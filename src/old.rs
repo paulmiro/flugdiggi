@@ -45,13 +45,51 @@ fn fw(lo: u8, hi: u8) -> String {
 
 impl Controller {
     pub fn open() -> Result<Self> {
-        Ok(Controller { t: Transport::open()? })
+        let c = Controller { t: Transport::open()? };
+        // The last command of a previous session is unknown, so make sure the next one differs from it.
+        c.separate()?;
+        Ok(c)
+    }
+
+    /// Sends a heartbeat with a fresh nonce. The dongle drops OUT packets identical to the previous
+    /// one, so this is sent between two identical commands.
+    fn separate(&self) -> Result<()> {
+        let req = cmd(0x10, &[self.nonce()]);
+        self.t.write(&req)?;
+        self.t.read_until(TIMEOUT, |p| is_reply(p) && p[15] == 0x10)?;
+        Ok(())
+    }
+
+    fn nonce(&self) -> u8 {
+        let last = self.t.last_sent();
+        loop {
+            let n = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos() as u8)
+                .unwrap_or(0x5c);
+            if last.get(1) != Some(&0x10) || last.get(2) != Some(&n) {
+                return n;
+            }
+        }
+    }
+
+    /// Writes `req` without waiting for a reply (for exploration).
+    pub fn send_raw(&self, req: &[u8]) -> Result<()> {
+        self.send(req)
+    }
+
+    /// Writes `req`, first separating it from an identical previous packet.
+    fn send(&self, req: &[u8]) -> Result<()> {
+        if self.t.would_repeat(req) {
+            self.separate()?;
+        }
+        self.t.write(req)
     }
 
     /// Sends `req` and returns the first reply matching `ack`, retrying on timeout.
     pub fn request(&self, req: &[u8], ack: impl Fn(&Packet) -> bool) -> Result<Packet> {
         for _ in 0..RETRIES {
-            self.t.write(req)?;
+            self.send(req)?;
             if let Some(p) = self.t.read_until(TIMEOUT, |p| is_reply(p) && ack(p))? {
                 return Ok(p);
             }
@@ -60,10 +98,7 @@ impl Controller {
     }
 
     pub fn heartbeat(&self) -> Result<DeviceInfo> {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .subsec_nanos() as u8;
-        let d = self.request(&cmd(0x10, &[nonce]), |p| p[15] == 0x10)?;
+        let d = self.request(&cmd(0x10, &[self.nonce()]), |p| p[15] == 0x10)?;
         Ok(DeviceInfo {
             device_type: d[16],
             mac: format!("{:02X}:{:02X}:{:02X}:{:02X}", d[20], d[19], d[18], d[17]),
@@ -91,17 +126,29 @@ impl Controller {
 
     /// Makes `slot` the active config.
     pub fn apply_config(&self, slot: u8) -> Result<()> {
-        let d = self.request(&cmd(0x50, &[5, slot]), |p| p[15] == 0x50 && p[16] == 5)?;
-        if d[17] != 0 {
-            bail!("controller rejected switching to slot {slot} (status {})", d[17]);
+        // Reply [17] was 1 on successful switches; the official SDK ignores it, so verify instead.
+        self.request(&cmd(0x50, &[5, slot]), |p| p[15] == 0x50 && p[16] == 5)?;
+        // The controller ignores commands for a while after switching slots.
+        let start = std::time::Instant::now();
+        while start.elapsed() < Duration::from_secs(5) {
+            self.send(&cmd(0x20, &[]))?;
+            if let Some(d) = self.t.read_until(Duration::from_millis(200), |p| is_reply(p) && p[15] == 0x20)? {
+                if self.t.trace {
+                    eprintln!("controller answered again after {:?}", start.elapsed());
+                }
+                if d[16] != slot {
+                    bail!("switch to slot {slot} not applied (active slot is {})", d[16]);
+                }
+                return Ok(());
+            }
         }
-        Ok(())
+        bail!("controller did not answer within 5 s after switching to slot {slot}")
     }
 
     /// Raw mapping config blob of `slot` (multi-packet reply to command 0x21).
     pub fn read_mapping_config_raw(&self, slot: u8) -> Result<Vec<u8>> {
         'retry: for _ in 0..RETRIES {
-            self.t.write(&cmd(0x21, &[slot]))?;
+            self.send(&cmd(0x21, &[slot]))?;
             let mut count: Option<usize> = None;
             let mut data: Vec<u8> = Vec::new();
             let mut received: Vec<bool> = Vec::new();

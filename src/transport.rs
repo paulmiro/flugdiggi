@@ -17,6 +17,7 @@ pub struct Transport {
     handle: DeviceHandle<GlobalContext>,
     pub product: String,
     pub trace: bool,
+    last_sent: std::cell::RefCell<Vec<u8>>,
 }
 
 impl Transport {
@@ -36,7 +37,7 @@ impl Transport {
             let product = handle.read_product_string_ascii(&desc).unwrap_or_default();
             handle.set_auto_detach_kernel_driver(true)?;
             handle.claim_interface(IFACE).context("claiming interface 0")?;
-            let t = Transport { handle, product, trace: false };
+            let t = Transport { handle, product, trace: false, last_sent: Default::default() };
             t.drain();
             return Ok(t);
         }
@@ -48,6 +49,7 @@ impl Transport {
             eprintln!(">> {}", hex(data));
         }
         self.handle.write_interrupt(EP_OUT, data, Duration::from_millis(500))?;
+        *self.last_sent.borrow_mut() = data.to_vec();
         Ok(())
     }
 
@@ -109,4 +111,15 @@ pub fn is_reply(p: &Packet) -> bool {
 
 pub fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(" ")
+}
+
+impl Transport {
+    /// The dongle silently drops an OUT packet identical to the previous one.
+    pub fn would_repeat(&self, data: &[u8]) -> bool {
+        *self.last_sent.borrow() == data
+    }
+
+    pub fn last_sent(&self) -> Vec<u8> {
+        self.last_sent.borrow().clone()
+    }
 }
