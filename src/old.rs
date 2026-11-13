@@ -19,6 +19,7 @@ use crate::transport::{Packet, Transport, is_reply};
 const PREFIX: u8 = 0xa5;
 const TIMEOUT: Duration = Duration::from_millis(500);
 const RETRIES: usize = 3;
+const SAVE_SETTLE: Duration = Duration::from_secs(3);
 
 pub struct Controller {
     pub t: Transport,
@@ -56,11 +57,11 @@ impl Blob {
     fn read_reply(self) -> u8 {
         self.read_cmd() + 1
     }
-    /// "Write all" start command; the official app uses it to persist configs of old-protocol devices.
-    fn write_all_cmd(self) -> u8 {
+    /// Partial write start command (live edit of the slot's working copy).
+    fn partial_cmd(self) -> u8 {
         match self {
-            Blob::Mapping => 0x25,
-            Blob::Led => 0x2a,
+            Blob::Mapping => 0x23,
+            Blob::Led => 0x28,
         }
     }
     fn packet_cmd(self) -> u8 {
@@ -272,39 +273,134 @@ impl Controller {
         self.read_blob_raw(blob, slot)
     }
 
-    /// Writes a complete blob with the "write all" command, which persists it.
-    pub fn write_blob_all(&self, blob: Blob, slot: u8, data: &[u8]) -> Result<()> {
-        if data.len() % 10 != 0 {
-            bail!("blob length must be a multiple of 10");
+    /// Reads a slot's blob and restores the previously active slot.
+    pub fn read_blob(&self, blob: Blob, slot: u8) -> Result<Vec<u8>> {
+        let active = self.current_config_id()?.0;
+        let data = self.read_blob_retrying(blob, slot);
+        self.apply_config(active)?;
+        data
+    }
+
+    /// Persistently writes `data` to `slot` the way the official app does: the changed packets are
+    /// written to the slot's working copy (which makes the slot active), the working copy is saved
+    /// with a new data version and the result is read back. The previously active slot is restored.
+    /// Returns the blob as stored (a mapping config's data version changes).
+    /// `version` is the data version to save with; `None` picks a new random one.
+    pub fn write_blob(&self, blob: Blob, slot: u8, data: &[u8], version: Option<u16>) -> Result<Vec<u8>> {
+        if slot > 3 {
+            bail!("writing Switch-mode slots (4-7) is not supported");
         }
-        let packets: Vec<&[u8]> = data.chunks(10).collect();
-        // Packets must not be resent individually: the controller counts every packet it receives
-        // (ack [16]) and silently drops the whole transfer if the count ends up wrong. So any lost or
-        // unexpected ack restarts the transfer with a new start command.
-        for attempt in 1..=RETRIES {
-            match self.try_write_blob_all(blob, slot, &packets) {
+        let active = self.current_config_id()?.0;
+        let result = self.write_blob_inner(blob, slot, data, version);
+        self.apply_config(active)?;
+        result
+    }
+
+    fn write_blob_inner(&self, blob: Blob, slot: u8, data: &[u8], version: Option<u16>) -> Result<Vec<u8>> {
+        // The save (0x50 03) stores the controller's whole working copy (mapping + LED) into the active
+        // slot, and a partial write to a slot does not load that slot into the working copy. So the slot
+        // is loaded with a real switch first (switching away first if it is active, which also drops
+        // unsaved edits), and afterwards both blobs are verified from flash.
+        let away = if slot == 0 { 1 } else { 0 };
+        if self.current_config_id()?.0 == slot {
+            self.apply_config(away)?;
+        }
+        self.apply_config(slot)?;
+        let other_blob = match blob {
+            Blob::Mapping => Blob::Led,
+            Blob::Led => Blob::Mapping,
+        };
+        let other_before = self.read_blob_retrying(other_blob, slot)?;
+        let old = self.read_blob_retrying(blob, slot)?;
+        if old.len() != data.len() {
+            bail!("{blob:?} data must be {} bytes", old.len());
+        }
+        if old == data {
+            return Ok(old);
+        }
+        let current = self.config_versions()?[slot as usize];
+        let version = version.unwrap_or_else(|| new_version(current));
+        let mut new = data.to_vec();
+        if let Blob::Mapping = blob {
+            new[crate::config::DATA_VERSION..crate::config::DATA_VERSION + 2].copy_from_slice(&version.to_le_bytes());
+        }
+        let old_p: Vec<&[u8]> = old.chunks(10).collect();
+        let new_p: Vec<&[u8]> = new.chunks(10).collect();
+        let mut i = 0;
+        while i < new_p.len() {
+            if old_p[i] == new_p[i] {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < new_p.len() && old_p[i] != new_p[i] {
+                i += 1;
+            }
+            self.write_run(blob, slot, start, &new_p[start..i])?;
+        }
+        if self.current_config_id()?.0 != slot {
+            bail!("slot {slot} is no longer active before saving; not saving");
+        }
+        self.save_active(version)?;
+        // The flash commit takes a while; switching slots too early discards the save.
+        std::thread::sleep(SAVE_SETTLE);
+        self.wait_responsive(Duration::from_secs(10))?;
+        // Reload from flash and verify both blobs.
+        self.apply_config(away)?;
+        if self.read_blob_retrying(blob, slot)? != new {
+            bail!("read-back of slot {slot} differs from what was written");
+        }
+        let mut other_expected = other_before;
+        if let Blob::Mapping = other_blob {
+            let v = crate::config::DATA_VERSION;
+            other_expected[v..v + 2].copy_from_slice(&version.to_le_bytes());
+        }
+        if self.read_blob_retrying(other_blob, slot)? != other_expected {
+            bail!("the {other_blob:?} config of slot {slot} changed unexpectedly while saving");
+        }
+        Ok(new)
+    }
+
+    /// Partial write of one run of packets. A failed transfer is restarted from its start command,
+    /// because the controller counts received packets and drops transfers with a wrong count.
+    fn write_run(&self, blob: Blob, slot: u8, start: usize, packets: &[&[u8]]) -> Result<()> {
+        let mut last_err = None;
+        for _ in 0..RETRIES {
+            match self.write_blob_partial(blob, slot, start as u8, packets) {
                 Ok(()) => return Ok(()),
                 Err(e) => {
-                    if self.t.trace {
-                        eprintln!("write attempt {attempt} failed: {e}");
-                    }
+                    last_err = Some(e);
                     self.wait_responsive(Duration::from_secs(5))?;
                 }
             }
         }
-        bail!("writing {blob:?} config of slot {slot} failed {RETRIES} times")
+        Err(last_err.unwrap())
     }
 
-    fn try_write_blob_all(&self, blob: Blob, slot: u8, packets: &[&[u8]]) -> Result<()> {
-        let start = blob.write_all_cmd();
-        self.request(&cmd(start, &[packets.len() as u8, 0xa0, slot]), |p| p[15] == start)?;
+    pub fn read_config(&self, slot: u8) -> Result<Vec<u8>> {
+        self.read_blob(Blob::Mapping, slot)
+    }
+
+    pub fn write_config(&self, slot: u8, data: &[u8], version: Option<u16>) -> Result<Vec<u8>> {
+        if data.len() != crate::config::CONFIG_LEN {
+            bail!("config must be {} bytes", crate::config::CONFIG_LEN);
+        }
+        self.write_blob(Blob::Mapping, slot, data, version)
+    }
+}
+
+impl Controller {
+    /// Partially writes consecutive packets starting at packet `start` (live edit, not persisted by itself).
+    pub fn write_blob_partial(&self, blob: Blob, slot: u8, start: u8, packets: &[&[u8]]) -> Result<()> {
+        let s = blob.partial_cmd();
+        self.separator(0x10)?;
+        self.request(&cmd(s, &[start, packets.len() as u8, 0xa0, slot]), |p| p[15] == s)?;
         for (i, chunk) in packets.iter().enumerate() {
             let mut args = [0u8; 12];
             args[..10].copy_from_slice(chunk);
             args[10] = 0xa0;
             args[11] = i as u8;
             self.send(&cmd(blob.packet_cmd(), &args))?;
-            // The first packet can take long to be acknowledged (flash erase?).
             let timeout = if i == 0 { Duration::from_secs(3) } else { Duration::from_secs(1) };
             let Some(ack) = self.t.read_until(timeout, |p| is_reply(p) && p[15] == blob.packet_cmd())? else {
                 bail!("no ack for packet {i}");
@@ -316,36 +412,27 @@ impl Controller {
         Ok(())
     }
 
-    /// Reads a slot's blob and restores the previously active slot.
-    pub fn read_blob(&self, blob: Blob, slot: u8) -> Result<Vec<u8>> {
-        let active = self.current_config_id()?.0;
-        let data = self.read_blob_retrying(blob, slot);
-        self.apply_config(active)?;
-        data
-    }
-
-    /// Persistently writes a complete blob to `slot`, verifies it by reading it back and restores
-    /// the previously active slot.
-    pub fn write_blob(&self, blob: Blob, slot: u8, data: &[u8]) -> Result<()> {
-        let active = self.current_config_id()?.0;
-        self.write_blob_all(blob, slot, data)?;
-        self.wait_responsive(Duration::from_secs(10))?;
-        let back = self.read_blob_retrying(blob, slot);
-        self.apply_config(active)?;
-        if back? != data {
-            bail!("read-back of slot {slot} differs from what was written");
-        }
+    /// "Permanent save" (0x50 03) of the active slot's working copy with a new data version.
+    pub fn save_active(&self, version: u16) -> Result<()> {
+        let [lo, hi] = version.to_le_bytes();
+        self.request_timeout(&cmd(0x50, &[3, lo, hi]), Duration::from_secs(10), |p| p[15] == 0x50 && p[16] == 3)?;
         Ok(())
     }
+}
 
-    pub fn read_config(&self, slot: u8) -> Result<Vec<u8>> {
-        self.read_blob(Blob::Mapping, slot)
-    }
-
-    pub fn write_config(&self, slot: u8, data: &[u8]) -> Result<()> {
-        if data.len() != crate::config::CONFIG_LEN {
-            bail!("config must be {} bytes", crate::config::CONFIG_LEN);
+/// A random data version different from `current` (the official app does the same on every save).
+fn new_version(current: u16) -> u16 {
+    let mut seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(1);
+    loop {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        let v = seed as u16;
+        if v != current {
+            return v;
         }
-        self.write_blob(Blob::Mapping, slot, data)
     }
 }
