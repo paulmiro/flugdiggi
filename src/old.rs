@@ -19,7 +19,9 @@ use crate::transport::{Packet, Transport, is_reply};
 const PREFIX: u8 = 0xa5;
 const TIMEOUT: Duration = Duration::from_millis(500);
 const RETRIES: usize = 3;
-const SAVE_SETTLE: Duration = Duration::from_secs(3);
+// 3 s was enough for mapping saves; LED saves corrupted the mapping with 3 s but worked with 8 s
+// (together with touching the mapping working copy, see write_blob_inner).
+const SAVE_SETTLE: Duration = Duration::from_secs(8);
 
 pub struct Controller {
     pub t: Transport,
@@ -338,6 +340,12 @@ impl Controller {
             }
             self.write_run(blob, slot, start, &new_p[start..i])?;
         }
+        if let Blob::Led = blob {
+            // Rewrite one unchanged mapping packet (the name) so the mapping working copy is touched before
+            // the save; an LED-only save once stored another slot's mapping into this slot.
+            let name = 77;
+            self.write_run(Blob::Mapping, slot, name, &[&other_before[10 * name..10 * name + 10]])?;
+        }
         if self.current_config_id()?.0 != slot {
             bail!("slot {slot} is no longer active before saving; not saving");
         }
@@ -345,8 +353,12 @@ impl Controller {
         // The flash commit takes a while; switching slots too early discards the save.
         std::thread::sleep(SAVE_SETTLE);
         self.wait_responsive(Duration::from_secs(10))?;
-        // Reload from flash and verify both blobs.
+        // Reload from flash and verify both blobs. Reading a slot right after switching away from it can
+        // return the newly active slot's data, so the slot is switched to explicitly before reading.
         self.apply_config(away)?;
+        std::thread::sleep(Duration::from_secs(1));
+        self.apply_config(slot)?;
+        std::thread::sleep(Duration::from_millis(500));
         if self.read_blob_retrying(blob, slot)? != new {
             bail!("read-back of slot {slot} differs from what was written");
         }
@@ -355,8 +367,13 @@ impl Controller {
             let v = crate::config::DATA_VERSION;
             other_expected[v..v + 2].copy_from_slice(&version.to_le_bytes());
         }
-        if self.read_blob_retrying(other_blob, slot)? != other_expected {
-            bail!("the {other_blob:?} config of slot {slot} changed unexpectedly while saving");
+        let other_after = self.read_blob_retrying(other_blob, slot)?;
+        if other_after != other_expected {
+            let diff: Vec<String> = (0..other_after.len())
+                .filter(|&i| other_after[i] != other_expected[i])
+                .map(|i| format!("{i}: {:02x} (expected {:02x})", other_after[i], other_expected[i]))
+                .collect();
+            bail!("the {other_blob:?} config of slot {slot} changed unexpectedly while saving: {diff:?}");
         }
         Ok(new)
     }

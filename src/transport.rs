@@ -64,6 +64,11 @@ impl Transport {
                 Ok(Some(p))
             }
             Err(rusb::Error::Timeout) => Ok(None),
+            // Occasional transient I/O errors were seen on the dongle; treat them like a missed packet.
+            Err(rusb::Error::Io) => {
+                std::thread::sleep(Duration::from_millis(50));
+                Ok(None)
+            }
             Err(e) => Err(e.into()),
         }
     }
