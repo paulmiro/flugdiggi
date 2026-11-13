@@ -97,9 +97,13 @@ impl Controller {
 
     /// Sends `req` and returns the first reply matching `ack`, retrying on timeout.
     pub fn request(&self, req: &[u8], ack: impl Fn(&Packet) -> bool) -> Result<Packet> {
+        self.request_timeout(req, TIMEOUT, ack)
+    }
+
+    pub fn request_timeout(&self, req: &[u8], timeout: Duration, ack: impl Fn(&Packet) -> bool) -> Result<Packet> {
         for _ in 0..RETRIES {
             self.send(req)?;
-            if let Some(p) = self.t.read_until(TIMEOUT, |p| is_reply(p) && ack(p))? {
+            if let Some(p) = self.t.read_until(timeout, |p| is_reply(p) && ack(p))? {
                 return Ok(p);
             }
         }
@@ -135,23 +139,33 @@ impl Controller {
 
     /// Makes `slot` the active config.
     pub fn apply_config(&self, slot: u8) -> Result<()> {
-        // Reply [17] was 1 on successful switches; the official SDK ignores it, so verify instead.
-        self.request(&cmd(0x50, &[5, slot]), |p| p[15] == 0x50 && p[16] == 5)?;
-        // The controller ignores commands for a while after switching slots.
+        // The controller does not answer a switch to the slot that is already active.
+        if self.current_config_id()?.0 == slot {
+            return Ok(());
+        }
+        // The switch reply ([17] = 1) is unreliable: it sometimes arrives late or not at all although the switch
+        // happened. So success is judged by polling the active slot.
+        let switch = cmd(0x50, &[5, slot]);
         let start = std::time::Instant::now();
+        let mut resent = false;
+        self.send(&switch)?;
         while start.elapsed() < Duration::from_secs(5) {
+            if !resent && start.elapsed() > Duration::from_millis(1500) {
+                self.send(&switch)?;
+                resent = true;
+            }
             self.send(&cmd(0x20, &[]))?;
             if let Some(d) = self.t.read_until(Duration::from_millis(200), |p| is_reply(p) && p[15] == 0x20)? {
-                if self.t.trace {
-                    eprintln!("controller answered again after {:?}", start.elapsed());
+                if d[16] == slot {
+                    if self.t.trace {
+                        eprintln!("slot {slot} active after {:?}", start.elapsed());
+                    }
+                    return Ok(());
                 }
-                if d[16] != slot {
-                    bail!("switch to slot {slot} not applied (active slot is {})", d[16]);
-                }
-                return Ok(());
             }
+            std::thread::sleep(Duration::from_millis(100));
         }
-        bail!("controller did not answer within 5 s after switching to slot {slot}")
+        bail!("slot {slot} did not become active within 5 s")
     }
 
     /// Raw mapping config blob of `slot` (multi-packet reply to command 0x21).
@@ -232,5 +246,62 @@ impl Controller {
             written += i - start;
         }
         Ok(written)
+    }
+}
+
+impl Controller {
+    /// Persists the active slot's working copy to flash and sets its data version
+    /// (the official app picks a new random version on every save).
+    pub fn save_active_config(&self, version: u16) -> Result<()> {
+        let [lo, hi] = version.to_le_bytes();
+        self.request_timeout(&cmd(0x50, &[3, lo, hi]), Duration::from_secs(10), |p| p[15] == 0x50 && p[16] == 3)?;
+        Ok(())
+    }
+}
+
+impl Controller {
+    /// Writes a complete config blob with the "write all" start command (0x25). The official app uses
+    /// this to persist configs of old-protocol controllers.
+    pub fn write_mapping_config_full(&self, slot: u8, data: &[u8]) -> Result<()> {
+        if data.len() % 10 != 0 {
+            bail!("config length must be a multiple of 10");
+        }
+        let packets: Vec<&[u8]> = data.chunks(10).collect();
+        self.request(&cmd(0x25, &[packets.len() as u8, 0xa0, slot]), |p| p[15] == 0x25)?;
+        for (i, chunk) in packets.iter().enumerate() {
+            let mut args = [0u8; 12];
+            args[..10].copy_from_slice(chunk);
+            args[10] = 0xa0;
+            args[11] = i as u8;
+            self.request(&cmd(0x24, &args), |p| p[15] == 0x24)?;
+        }
+        Ok(())
+    }
+}
+
+impl Controller {
+    /// Reads a slot's config. Reading activates the slot on the controller, so the previously
+    /// active slot is restored afterwards.
+    pub fn read_config(&self, slot: u8) -> Result<Vec<u8>> {
+        let active = self.current_config_id()?.0;
+        let data = self.read_mapping_config_raw(slot);
+        self.apply_config(active)?;
+        data
+    }
+
+    /// Persistently writes a complete config to `slot`, verifies it by reading it back and restores
+    /// the previously active slot.
+    pub fn write_config(&self, slot: u8, data: &[u8]) -> Result<()> {
+        if data.len() != crate::config::CONFIG_LEN {
+            bail!("config must be {} bytes", crate::config::CONFIG_LEN);
+        }
+        let active = self.current_config_id()?.0;
+        self.write_mapping_config_full(slot, data)?;
+        let back = self.read_mapping_config_raw(slot);
+        self.apply_config(active)?;
+        if back? != data {
+            bail!("read-back of slot {slot} differs from what was written");
+        }
+        Ok(())
     }
 }

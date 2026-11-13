@@ -6,3 +6,5 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.104"
 rusb = "0.9.4"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.2.1"
