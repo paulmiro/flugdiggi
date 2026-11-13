@@ -46,17 +46,22 @@ fn fw(lo: u8, hi: u8) -> String {
 impl Controller {
     pub fn open() -> Result<Self> {
         let c = Controller { t: Transport::open()? };
-        // The last command of a previous session is unknown, so make sure the next one differs from it.
-        c.separate()?;
+        // The last reply of a previous session is unknown; after these two, the last reply is a known heartbeat.
+        c.separator(0x20)?;
+        c.separator(0x10)?;
         Ok(c)
     }
 
-    /// Sends a heartbeat with a fresh nonce. The dongle drops OUT packets identical to the previous
-    /// one, so this is sent between two identical commands.
-    fn separate(&self) -> Result<()> {
-        let req = cmd(0x10, &[self.nonce()]);
+    /// The controller does not answer when the reply would be identical to its previous reply
+    /// (e.g. the same command twice in a row), so a different command is sent in between.
+    fn separate(&self, req: &[u8]) -> Result<()> {
+        self.separator(if req[1] == 0x10 { 0x20 } else { 0x10 })
+    }
+
+    fn separator(&self, id: u8) -> Result<()> {
+        let req = if id == 0x10 { cmd(0x10, &[self.nonce()]) } else { cmd(id, &[]) };
         self.t.write(&req)?;
-        self.t.read_until(TIMEOUT, |p| is_reply(p) && p[15] == 0x10)?;
+        self.t.read_until(Duration::from_millis(150), |p| is_reply(p) && p[15] == id)?;
         Ok(())
     }
 
@@ -80,8 +85,12 @@ impl Controller {
 
     /// Writes `req`, first separating it from an identical previous packet.
     fn send(&self, req: &[u8]) -> Result<()> {
-        if self.t.would_repeat(req) {
-            self.separate()?;
+        let last = self.t.last_sent();
+        let same_cmd = last.get(1) == req.get(1)
+            && (req[1] != 0x50 || last.get(2) == req.get(2))
+            && !matches!(req[1], 0x21 | 0x24);
+        if same_cmd || self.t.would_repeat(req) {
+            self.separate(req)?;
         }
         self.t.write(req)
     }
@@ -186,5 +195,42 @@ impl Controller {
             }
         }
         bail!("could not read mapping config of slot {slot}")
+    }
+
+    /// Writes consecutive 10-byte packets of a mapping config, starting at packet `start`.
+    fn write_mapping_packets(&self, slot: u8, start: u8, packets: &[&[u8]]) -> Result<()> {
+        self.request(&cmd(0x23, &[start, packets.len() as u8, 0xa0, slot]), |p| p[15] == 0x23)?;
+        for (i, data) in packets.iter().enumerate() {
+            let mut args = [0u8; 12];
+            args[..10].copy_from_slice(data);
+            args[10] = 0xa0;
+            args[11] = i as u8;
+            self.request(&cmd(0x24, &args), |p| p[15] == 0x24)?;
+        }
+        Ok(())
+    }
+
+    /// Writes only the 10-byte packets in which `new` differs from `old`. Returns the number of packets written.
+    pub fn write_mapping_config_diff(&self, slot: u8, old: &[u8], new: &[u8]) -> Result<usize> {
+        if old.len() != new.len() || old.len() % 10 != 0 {
+            bail!("config blobs must have equal length that is a multiple of 10");
+        }
+        let old: Vec<&[u8]> = old.chunks(10).collect();
+        let new: Vec<&[u8]> = new.chunks(10).collect();
+        let mut written = 0;
+        let mut i = 0;
+        while i < new.len() {
+            if old[i] == new[i] {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < new.len() && old[i] != new[i] {
+                i += 1;
+            }
+            self.write_mapping_packets(slot, start as u8, &new[start..i])?;
+            written += i - start;
+        }
+        Ok(written)
     }
 }

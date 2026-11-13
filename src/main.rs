@@ -48,6 +48,53 @@ fn main() -> Result<()> {
                 }
             }
         }
+        "set-name" => {
+            let (Some(slot), Some(name)) = (args.get(1), args.get(2)) else { usage() };
+            let slot: u8 = slot.parse()?;
+            if slot > 7 {
+                bail!("slot must be 0..=7");
+            }
+            if c.current_config_id()?.0 == slot {
+                bail!("refusing to write the active slot");
+            }
+            let units: Vec<u16> = name.encode_utf16().collect();
+            if units.len() > 8 {
+                bail!("name too long (max 8 UTF-16 units)");
+            }
+            let old = c.read_mapping_config_raw(slot)?;
+            let backup = format!("flugdiggi-backup-slot{slot}-{}.bin", unix_time());
+            std::fs::write(&backup, &old)?;
+            println!("backup written to {backup}");
+            let mut new = old.clone();
+            new[770..786].fill(0);
+            for (i, u) in units.iter().enumerate() {
+                new[770 + 2 * i..772 + 2 * i].copy_from_slice(&u.to_le_bytes());
+            }
+            let n = c.write_mapping_config_diff(slot, &old, &new)?;
+            println!("{n} packets written");
+            let back = c.read_mapping_config_raw(slot)?;
+            if back == new {
+                println!("verified: slot {slot} reads back as written");
+            } else {
+                let diff: Vec<usize> = (0..back.len()).filter(|&i| back[i] != new[i]).collect();
+                bail!("read-back differs from what was written at offsets {diff:?}");
+            }
+        }
+        "restore" => {
+            let (Some(slot), Some(file)) = (args.get(1), args.get(2)) else { usage() };
+            let slot: u8 = slot.parse()?;
+            let new = std::fs::read(file)?;
+            let old = c.read_mapping_config_raw(slot)?;
+            let backup = format!("flugdiggi-backup-slot{slot}-{}.bin", unix_time());
+            std::fs::write(&backup, &old)?;
+            println!("backup written to {backup}");
+            let n = c.write_mapping_config_diff(slot, &old, &new)?;
+            println!("{n} packets written");
+            if c.read_mapping_config_raw(slot)? != new {
+                bail!("read-back differs from {file}");
+            }
+            println!("verified");
+        }
         // Sends a sequence of read-only commands, e.g. `raw 20 20 10:5c 20`, and prints every reply seen.
         "raw" => {
             for spec in &args[1..] {
@@ -76,4 +123,11 @@ fn main() -> Result<()> {
         _ => usage(),
     }
     Ok(())
+}
+
+fn unix_time() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
