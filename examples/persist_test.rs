@@ -5,13 +5,13 @@ use std::time::Duration;
 
 use anyhow::{Result, ensure};
 use flugdiggi::config::Config;
-use flugdiggi::old::Controller;
+use flugdiggi::old::{Blob, Controller};
 
 const SLOT: u8 = 3;
 
 fn read_retry(c: &Controller, slot: u8) -> Result<Vec<u8>> {
     for _ in 0..5 {
-        match c.read_mapping_config_raw(slot) {
+        match c.read_blob_raw(Blob::Mapping, slot) {
             Ok(d) => return Ok(d),
             Err(e) => {
                 println!("  read failed ({e}), waiting");
@@ -19,7 +19,7 @@ fn read_retry(c: &Controller, slot: u8) -> Result<Vec<u8>> {
             }
         }
     }
-    c.read_mapping_config_raw(slot)
+    c.read_blob_raw(Blob::Mapping, slot)
 }
 
 fn main() -> Result<()> {
@@ -37,7 +37,7 @@ fn main() -> Result<()> {
     let modified = cfg.apply(&orig)?;
 
     println!("write-all modified config, switch away, read back");
-    c.write_mapping_config_full(SLOT, &modified)?;
+    c.write_blob_all(Blob::Mapping, SLOT, &modified)?;
     std::thread::sleep(Duration::from_millis(500));
     println!("  active after write-all: {}", c.current_config_id()?.0);
     c.apply_config(active)?;
@@ -47,7 +47,7 @@ fn main() -> Result<()> {
     println!("  versions: {:04x?}", c.config_versions()?);
 
     println!("restore with write-all");
-    c.write_mapping_config_full(SLOT, &orig)?;
+    c.write_blob_all(Blob::Mapping, SLOT, &orig)?;
     std::thread::sleep(Duration::from_millis(500));
     c.apply_config(active)?;
     std::thread::sleep(Duration::from_millis(500));
