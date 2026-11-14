@@ -20,6 +20,7 @@ const PREFIX: u8 = 0xa5;
 const TIMEOUT: Duration = Duration::from_millis(500);
 const RETRIES: usize = 3;
 const MAX_SLOT: u8 = 7;
+const REPAIRS: usize = 2;
 // How long the controller may ignore commands (after switches and saves) before an operation fails.
 // Over the dongle, 20 s was sometimes not enough.
 const UNRESPONSIVE_MAX: Duration = Duration::from_secs(60);
@@ -131,6 +132,22 @@ pub enum Version {
     Keep,
     Exact(u16),
 }
+
+/// The read-back after a save did not match. `expected` is the content both blobs should have.
+#[derive(Debug)]
+struct VerifyFailed {
+    reason: String,
+    expected: [(Blob, Vec<u8>); 2],
+    version: u16,
+}
+
+impl std::fmt::Display for VerifyFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
+impl std::error::Error for VerifyFailed {}
 
 /// A plausible active-slot (0x20) reply. Replies are sometimes torn: bytes 15-17 still hold the previous
 /// reply while the rest is the new one, or vice versa. A torn reply once reported the device type (105)
@@ -453,6 +470,17 @@ impl Controller {
             eprintln!("the controller ignored the write; reloading slot {slot} and writing again");
             result = self.write_blob_inner(blob, slot, &mut get, version, true);
         }
+        for _ in 0..REPAIRS {
+            let Some(failed) = result.as_ref().err().and_then(|e| e.downcast_ref::<VerifyFailed>()) else {
+                break;
+            };
+            eprintln!("verification failed ({failed}); repairing slot {slot}");
+            let (expected, version) = (failed.expected.clone(), failed.version);
+            result = self.repair(slot, &expected, version).map(|()| {
+                let main = expected.iter().find(|(b, _)| std::mem::discriminant(b) == std::mem::discriminant(&blob));
+                main.map(|(_, d)| d.clone())
+            });
+        }
         // Switching to a Switch-mode slot (4-7) also makes it the Switch-mode slot; switching to the
         // previous one first restores that.
         if let Some(s) = switch_slot.filter(|&s| s != slot && slot > 3) {
@@ -460,6 +488,27 @@ impl Controller {
         }
         self.apply_config(active)?;
         result
+    }
+
+    /// Writes both blobs of `slot` to `expected` where they differ (after a failed verification).
+    fn repair(&self, slot: u8, expected: &[(Blob, Vec<u8>); 2], version: u16) -> Result<()> {
+        for (blob, data) in expected {
+            self.write_blob_inner(*blob, slot, &mut |_| Ok(data.clone()), Version::Exact(version), true)?;
+        }
+        Ok(())
+    }
+
+    /// Discards replies until none has arrived for `quiet` (at most `max`). Returns the number discarded.
+    fn drain_quiet(&self, quiet: Duration, max: Duration) -> usize {
+        let start = Instant::now();
+        let mut n = 0;
+        while start.elapsed() < max {
+            match self.t.read_until(quiet, is_reply) {
+                Ok(Some(_)) => n += 1,
+                _ => break,
+            }
+        }
+        n
     }
 
     fn write_blob_inner(
@@ -521,6 +570,13 @@ impl Controller {
             let name = 77;
             self.write_run(Blob::Mapping, slot, name, &[&other_before[10 * name..10 * name + 10]])?;
         }
+        // Sometimes (after saves) the controller falls into a mode with one read packet per 40 ms instead of
+        // 4-14 ms, lags behind and keeps streaming old transfers. Saves made while it still streamed were lost
+        // or stored an outdated LED config, so the stream is drained first.
+        let stale = self.drain_quiet(Duration::from_millis(300), Duration::from_secs(15));
+        if stale > 0 {
+            eprintln!("discarded {stale} unrequested replies before saving");
+        }
         if self.current_config_id()?.0 != slot {
             bail!("slot {slot} is no longer active before saving; not saving");
         }
@@ -532,6 +588,16 @@ impl Controller {
         std::thread::sleep(Duration::from_secs(1));
         self.apply_config(slot)?;
         std::thread::sleep(Duration::from_millis(500));
+        let mut other_expected = other_before;
+        if let Blob::Mapping = other_blob {
+            let v = crate::config::DATA_VERSION;
+            other_expected[v..v + 2].copy_from_slice(&version.to_le_bytes());
+        }
+        let failed = |reason: String, other_expected: Vec<u8>| VerifyFailed {
+            reason,
+            expected: [(other_blob, other_expected), (blob, new.clone())],
+            version,
+        };
         let back = self.read_blob_retrying(blob, slot)?;
         if back != new {
             // Removing a macro and its button's "macro" target in one write leaves the target set (the
@@ -542,12 +608,7 @@ impl Controller {
                 eprintln!("button table of slot {slot} differs after writing; writing it again");
                 return self.write_blob_inner(blob, slot, make, Version::Exact(version), false);
             }
-            bail!("read-back of slot {slot} differs from what was written");
-        }
-        let mut other_expected = other_before;
-        if let Blob::Mapping = other_blob {
-            let v = crate::config::DATA_VERSION;
-            other_expected[v..v + 2].copy_from_slice(&version.to_le_bytes());
+            return Err(failed(format!("read-back of slot {slot} differs from what was written"), other_expected).into());
         }
         let other_after = self.read_blob_retrying(other_blob, slot)?;
         if other_after != other_expected {
@@ -555,7 +616,8 @@ impl Controller {
                 .filter(|&i| other_after[i] != other_expected[i])
                 .map(|i| format!("{i}: {:02x} (expected {:02x})", other_after[i], other_expected[i]))
                 .collect();
-            bail!("the {other_blob:?} config of slot {slot} changed unexpectedly while saving: {diff:?}");
+            let reason = format!("the {other_blob:?} config of slot {slot} changed unexpectedly while saving: {diff:?}");
+            return Err(failed(reason, other_expected).into());
         }
         Ok(Some(new))
     }

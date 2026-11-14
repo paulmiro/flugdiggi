@@ -40,7 +40,7 @@ Typical edit: `flugdiggi export 1 cfg.toml`, edit, `flugdiggi import 1 cfg.toml`
   active Switch-mode slot are restored.
 - Every write first saves the slot's previous content to
   `flugdiggi-backup-<kind>-slot<N>-<time>.bin` in the current directory, then saves to flash,
-  reloads the slot and verifies both its mapping and LED config. A write takes 15-35 s.
+  reloads the slot and verifies both its mapping and LED config. A write takes about 10 s.
 - `info` reports the battery as a level 0-5 (6 = charging).
 - The LED shown is the active slot's LED config.
 
@@ -150,5 +150,11 @@ event = 0
 - Sometimes the controller answers LED reads with mapping data; a full mapping read (or a slot switch)
   clears that. If it ignores the start of a write, the slot is reloaded and the write restarted, since
   pushing such a write through often saved an outdated LED config.
+- After saves the controller sometimes falls into a slow mode (one read packet per 40 ms) in which it
+  keeps streaming old transfers; a save made then is lost or stores an outdated LED config. flugdiggi
+  discards leftover replies before every save, and if the read-back still differs it writes the slot
+  again (up to twice).
+- A write takes about 10 s over the dongle: it waits for the flash write after the save (about 2 s)
+  instead of a fixed time, and resends ignored slot switches quickly.
 
 Protocol notes and logs live in the separate `workdir` repository.
