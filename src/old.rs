@@ -150,18 +150,45 @@ impl Controller {
 
     pub fn request_timeout(&self, req: &[u8], timeout: Duration, ack: impl Fn(&Packet) -> bool) -> Result<Packet> {
         for _ in 0..RETRIES {
-            self.send(req)?;
-            if let Some(p) = self.t.read_until(timeout, |p| is_reply(p) && ack(p))? {
-                return Ok(p);
+            let r = self.send(req).and_then(|()| self.t.read_until(timeout, |p| is_reply(p) && ack(p)));
+            match r {
+                Ok(Some(p)) => return Ok(p),
+                Ok(None) => {}
+                Err(e) => self.recover_usb_error(e)?,
             }
         }
         bail!("no reply to command 0x{:02x} after {RETRIES} tries", req[1])
     }
 
-    /// Waits until the controller answers again.
+    /// Reopens the device if it has re-enumerated. Some seconds after a save the controller sometimes
+    /// drops its link (it goes silent, ~2 s later the dongle re-enumerates). Returns true if reopened.
+    fn reconnect_if_gone(&self) -> Result<bool> {
+        if !self.t.is_gone() {
+            return Ok(false);
+        }
+        self.t.reconnect(Duration::from_secs(15))?;
+        self.separator(0x20)?;
+        self.separator(0x10)?;
+        Ok(true)
+    }
+
+    /// Called after a USB error: waits briefly for the device to disappear and reopens it.
+    fn recover_usb_error(&self, err: anyhow::Error) -> Result<()> {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(4) {
+            if self.reconnect_if_gone()? {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        Err(err)
+    }
+
+    /// Waits until the controller answers again, reopening the device if it re-enumerated.
     fn wait_responsive(&self, max: Duration) -> Result<()> {
         let start = Instant::now();
         while start.elapsed() < max {
+            self.reconnect_if_gone()?;
             if self.current_config_id().is_ok() {
                 return Ok(());
             }
@@ -208,33 +235,50 @@ impl Controller {
         let switch = cmd(0x50, &[5, slot]);
         let start = Instant::now();
         let mut resent = 0u64;
-        self.send(&switch)?;
-        while start.elapsed() < Duration::from_secs(10) {
-            if resent < 3 && start.elapsed() > Duration::from_millis(1500 * (resent + 1)) {
-                self.send(&switch)?;
-                resent += 1;
-            }
-            self.send(&cmd(0x20, &[]))?;
-            if let Some(d) = self.t.read_until(Duration::from_millis(200), |p| is_reply(p) && p[15] == 0x20)? {
-                if d[16] == slot {
-                    return Ok(());
+        let mut need_switch = true;
+        while start.elapsed() < Duration::from_secs(20) {
+            let r = (|| {
+                if need_switch || (resent < 3 && start.elapsed() > Duration::from_millis(1500 * (resent + 1))) {
+                    self.send(&switch)?;
+                    if !need_switch {
+                        resent += 1;
+                    }
+                    need_switch = false;
+                }
+                self.send(&cmd(0x20, &[]))?;
+                self.t.read_until(Duration::from_millis(200), |p| is_reply(p) && p[15] == 0x20)
+            })();
+            match r {
+                Ok(Some(d)) if d[16] == slot => return Ok(()),
+                Ok(_) => {}
+                Err(e) => {
+                    self.recover_usb_error(e)?;
+                    need_switch = true;
                 }
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        bail!("slot {slot} did not become active within 10 s")
+        bail!("slot {slot} did not become active within 20 s")
     }
 
     /// Reads a blob without restoring the active slot (reading makes `slot` active).
     pub fn read_blob_raw(&self, blob: Blob, slot: u8) -> Result<Vec<u8>> {
         'retry: for _ in 0..RETRIES {
-            self.send(&cmd(blob.read_cmd(), &[slot]))?;
+            if let Err(e) = self.send(&cmd(blob.read_cmd(), &[slot])) {
+                self.recover_usb_error(e)?;
+                continue;
+            }
             let mut count: Option<usize> = None;
             let mut data: Vec<u8> = Vec::new();
             let mut received: Vec<bool> = Vec::new();
             loop {
-                let Some(p) = self.t.read_until(TIMEOUT, |p| is_reply(p) && p[15] == blob.read_reply())? else {
-                    continue 'retry;
+                let p = match self.t.read_until(TIMEOUT, |p| is_reply(p) && p[15] == blob.read_reply()) {
+                    Ok(Some(p)) => p,
+                    Ok(None) => continue 'retry,
+                    Err(e) => {
+                        self.recover_usb_error(e)?;
+                        continue 'retry;
+                    }
                 };
                 let idx = p[16] as usize;
                 if count.is_none() {
@@ -265,14 +309,18 @@ impl Controller {
         bail!("could not read {blob:?} config of slot {slot}")
     }
 
+    /// After slot switches and saves the controller sometimes ignores (read) commands for many seconds.
     fn read_blob_retrying(&self, blob: Blob, slot: u8) -> Result<Vec<u8>> {
-        for _ in 0..2 {
-            if let Ok(d) = self.read_blob_raw(blob, slot) {
-                return Ok(d);
+        let start = Instant::now();
+        loop {
+            match self.read_blob_raw(blob, slot) {
+                Ok(d) => return Ok(d),
+                Err(e) if start.elapsed() > Duration::from_secs(20) => return Err(e),
+                Err(_) => {}
             }
             self.wait_responsive(Duration::from_secs(5))?;
+            std::thread::sleep(Duration::from_millis(500));
         }
-        self.read_blob_raw(blob, slot)
     }
 
     /// Reads a slot's blob and restores the previously active slot.

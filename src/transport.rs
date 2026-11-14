@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -14,41 +15,76 @@ const EP_OUT: u8 = 0x05;
 pub type Packet = [u8; 32];
 
 pub struct Transport {
-    handle: DeviceHandle<GlobalContext>,
+    handle: RefCell<DeviceHandle<GlobalContext>>,
     pub product: String,
     pub trace: bool,
-    last_sent: std::cell::RefCell<Vec<u8>>,
+    last_sent: RefCell<Vec<u8>>,
+}
+
+/// Opens the first 045e:028e device whose manufacturer string is "Flydigi".
+fn find() -> Result<Option<(DeviceHandle<GlobalContext>, String)>> {
+    for dev in rusb::devices()?.iter() {
+        let desc = dev.device_descriptor()?;
+        if desc.vendor_id() != XUSB_VID || desc.product_id() != XUSB_PID {
+            continue;
+        }
+        let handle = dev.open().context("opening USB device")?;
+        let manufacturer = handle.read_manufacturer_string_ascii(&desc).unwrap_or_default();
+        if !manufacturer.eq_ignore_ascii_case("flydigi") {
+            continue;
+        }
+        let product = handle.read_product_string_ascii(&desc).unwrap_or_default();
+        handle.set_auto_detach_kernel_driver(true)?;
+        handle.claim_interface(IFACE).context("claiming interface 0")?;
+        return Ok(Some((handle, product)));
+    }
+    Ok(None)
 }
 
 impl Transport {
-    /// Opens the first 045e:028e device whose manufacturer string is "Flydigi".
     /// The kernel driver (xpad) is detached while the transport is alive and reattached on drop.
     pub fn open() -> Result<Self> {
-        for dev in rusb::devices()?.iter() {
-            let desc = dev.device_descriptor()?;
-            if desc.vendor_id() != XUSB_VID || desc.product_id() != XUSB_PID {
-                continue;
+        let Some((handle, product)) = find()? else {
+            bail!("no Flydigi device (045e:028e, manufacturer \"Flydigi\") found");
+        };
+        let t = Transport { handle: RefCell::new(handle), product, trace: false, last_sent: Default::default() };
+        t.drain();
+        Ok(t)
+    }
+
+    /// True if the device behind the handle has disappeared from the bus (e.g. re-enumerated).
+    pub fn is_gone(&self) -> bool {
+        let dev = self.handle.borrow().device();
+        let Ok(list) = rusb::devices() else { return false };
+        !list.iter().any(|d| d.bus_number() == dev.bus_number() && d.address() == dev.address())
+    }
+
+    /// Waits for the device to come back after a re-enumeration and reopens it.
+    pub fn reconnect(&self, max: Duration) -> Result<()> {
+        let start = Instant::now();
+        loop {
+            if let Ok(Some((handle, _))) = find() {
+                let _ = self.handle.borrow().release_interface(IFACE);
+                *self.handle.borrow_mut() = handle;
+                self.last_sent.borrow_mut().clear();
+                if self.trace {
+                    eprintln!("-- reconnected");
+                }
+                self.drain();
+                return Ok(());
             }
-            let handle = dev.open().context("opening USB device")?;
-            let manufacturer = handle.read_manufacturer_string_ascii(&desc).unwrap_or_default();
-            if !manufacturer.eq_ignore_ascii_case("flydigi") {
-                continue;
+            if start.elapsed() > max {
+                bail!("device did not come back within {max:?}");
             }
-            let product = handle.read_product_string_ascii(&desc).unwrap_or_default();
-            handle.set_auto_detach_kernel_driver(true)?;
-            handle.claim_interface(IFACE).context("claiming interface 0")?;
-            let t = Transport { handle, product, trace: false, last_sent: Default::default() };
-            t.drain();
-            return Ok(t);
+            std::thread::sleep(Duration::from_millis(250));
         }
-        bail!("no Flydigi device (045e:028e, manufacturer \"Flydigi\") found")
     }
 
     pub fn write(&self, data: &[u8]) -> Result<()> {
         if self.trace {
             eprintln!(">> {}", hex(data));
         }
-        self.handle.write_interrupt(EP_OUT, data, Duration::from_millis(500))?;
+        self.handle.borrow().write_interrupt(EP_OUT, data, Duration::from_millis(500))?;
         *self.last_sent.borrow_mut() = data.to_vec();
         Ok(())
     }
@@ -56,7 +92,8 @@ impl Transport {
     /// Returns the next IN packet, or None on timeout.
     pub fn read(&self, timeout: Duration) -> Result<Option<Packet>> {
         let mut buf = [0u8; 64];
-        match self.handle.read_interrupt(EP_IN, &mut buf, timeout) {
+        let r = self.handle.borrow().read_interrupt(EP_IN, &mut buf, timeout);
+        match r {
             Ok(n) => {
                 let mut p = [0u8; 32];
                 let n = n.min(32);
@@ -105,7 +142,7 @@ impl Transport {
 
 impl Drop for Transport {
     fn drop(&mut self) {
-        let _ = self.handle.release_interface(IFACE);
+        let _ = self.handle.borrow().release_interface(IFACE);
     }
 }
 
