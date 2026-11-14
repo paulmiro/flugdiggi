@@ -18,8 +18,9 @@ nix-shell --run 'cargo build --release'
 ```
 flugdiggi [-v] [--device <port|MAC>] <command>
 
-  list [--mac]                list connected Flydigi controllers by USB port; --mac also
-                              shows their MACs but briefly disconnects them from games
+  list [--mac]                list connected Flydigi controllers by USB port and connection
+                              ("cable?"/"dongle?" = guess); --mac also shows their MACs and the
+                              exact connection but briefly disconnects them from games
   info                        device info, active slot, slot versions
   slot [N]                    show or switch the active slot (0-3)
   export <slot> [file.toml]   print or save a slot's config as TOML
@@ -40,7 +41,14 @@ Typical edit: `flugdiggi export 1 cfg.toml`, edit, `flugdiggi import 1 cfg.toml`
 With several controllers connected, pick one with `--device <port|MAC>` (see `flugdiggi list`); without it
 flugdiggi refuses to run. Selecting by USB port (e.g. `3-3`) touches no other device; selecting by MAC
 (and `list --mac`) briefly disconnects every controller from games, since the MAC can only be read by claiming
-the device. After a dongle re-enumeration flugdiggi only reopens the device back on the same port, and
+the device.
+
+Without `--mac`, the connection shown by `list` is a guess (`cable?`/`dongle?`): a wired Vader 4 Pro
+(firmware 6.9.5.5) refuses the USB manufacturer string request, the dongle answers it. This is a firmware
+quirk and may change with other firmware or models. `list --mac` reads the wired flag from the
+controller's heartbeat instead.
+
+After a dongle re-enumeration flugdiggi only reopens the device back on the same port, and
 only if it reports the same MAC.
 
 - Slots 0-3 are the XInput-mode configs, 4-7 the Switch-mode configs; all are readable and writable.

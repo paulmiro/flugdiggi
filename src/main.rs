@@ -8,8 +8,9 @@ use flugdiggi::transport::{hex, is_reply};
 
 const USAGE: &str = "usage: flugdiggi [-v] [--device <port|MAC>] <command>
 
-  list [--mac]                list connected Flydigi controllers by USB port; --mac also
-                              shows their MACs but briefly disconnects them from games
+  list [--mac]                list connected Flydigi controllers by USB port and connection
+                              (\"cable?\"/\"dongle?\" = guess); --mac also shows their MACs and the
+                              exact connection but briefly disconnects them from games
   info                        device info, active slot, slot versions
   slot [N]                    show or switch the active slot (0-3)
   export <slot> [file.toml]   print or save a slot's config as TOML
@@ -115,7 +116,12 @@ fn main() -> Result<()> {
             _ => usage(),
         };
         for f in Controller::list(probe)? {
-            let conn = if f.wired { "cable " } else { "dongle" };
+            let conn = match (f.wired, f.info.is_some()) {
+                (true, true) => "cable  ",
+                (false, true) => "dongle ",
+                (true, false) => "cable? ",
+                (false, false) => "dongle?",
+            };
             match (probe, f.info) {
                 (false, _) => println!("{}  {conn}  {}", f.port, f.product),
                 (true, Some(i)) => println!("{}  {conn}  {}  {}  firmware {}", f.port, i.mac, f.product, i.firmware),
