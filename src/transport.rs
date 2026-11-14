@@ -29,9 +29,16 @@ pub struct Candidate {
 }
 
 impl Candidate {
-    pub fn location(&self) -> String {
-        format!("{:03}:{:03}", self.dev.bus_number(), self.dev.address())
+    pub fn port(&self) -> String {
+        port(&self.dev)
     }
+}
+
+/// The USB port path as in sysfs (e.g. "3-1.2"). Unlike the address, it survives a re-enumeration.
+fn port(dev: &rusb::Device<GlobalContext>) -> String {
+    let ports = dev.port_numbers().unwrap_or_default();
+    let path = ports.iter().map(u8::to_string).collect::<Vec<_>>().join(".");
+    format!("{}-{path}", dev.bus_number())
 }
 
 /// Lists Flydigi devices. Devices that can't be opened (e.g. no permission) are skipped.
@@ -75,6 +82,10 @@ impl Transport {
         let dev = self.handle.borrow().device();
         let Ok(list) = rusb::devices() else { return false };
         !list.iter().any(|d| d.bus_number() == dev.bus_number() && d.address() == dev.address())
+    }
+
+    pub fn port(&self) -> String {
+        port(&self.handle.borrow().device())
     }
 
     /// Continues on the device of `other` (after a re-enumeration); `other` gets the old handle.

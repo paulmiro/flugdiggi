@@ -41,7 +41,7 @@ pub struct Controller {
 
 /// A Flydigi USB device and the heartbeat it answered with (None if it didn't answer).
 pub struct Found {
-    pub location: String,
+    pub port: String,
     pub product: String,
     pub info: Option<DeviceInfo>,
 }
@@ -196,17 +196,31 @@ fn device_info(d: &Packet) -> DeviceInfo {
 impl Controller {
     /// Opens the only Flydigi controller; fails if there are several.
     pub fn open() -> Result<Self> {
-        Self::open_mac(None)
+        Self::open_device(None)
     }
 
-    /// Opens the controller with this MAC, or the only one if `mac` is None.
-    pub fn open_mac(mac: Option<&str>) -> Result<Self> {
+    /// Opens the controller selected by `device`: a MAC ("38:33:FD:F5"), a USB port ("3-3"), or None for
+    /// the only one.
+    ///
+    /// Selecting by MAC with several devices connected briefly disconnects the other controllers from
+    /// their kernel driver (games see them disconnect and reconnect), because the MAC can only be read by
+    /// claiming each device.
+    pub fn open_device(device: Option<&str>) -> Result<Self> {
         let cands = candidates()?;
         if cands.is_empty() {
             bail!("no Flydigi device (045e:028e) found");
         }
-        if mac.is_none() && cands.len() == 1 {
-            let c = Self::init(Transport::open(&cands[0])?)?;
+        let mac = device.filter(|d| d.contains(':'));
+        let chosen = match device {
+            Some(d) if mac.is_none() => match cands.iter().find(|c| c.port() == d) {
+                Some(c) => Some(c),
+                None => bail!("no Flydigi device on USB port {d}"),
+            },
+            None if cands.len() == 1 => Some(&cands[0]),
+            _ => None,
+        };
+        if let Some(cand) = chosen {
+            let c = Self::init(Transport::open(cand)?)?;
             let mac = c.probe().map(|i| i.mac);
             return Ok(Controller { mac, ..c });
         }
@@ -221,17 +235,23 @@ impl Controller {
         }
         match mac {
             Some(m) => bail!("no controller with MAC {m} found (answering: {})", seen.join(", ")),
-            None => bail!("several Flydigi devices found, choose one with --device <MAC> (see `flugdiggi list`)"),
+            None => bail!("several Flydigi devices found, choose one with --device <port|MAC> (see `flugdiggi list`)"),
         }
     }
 
-    /// Lists all Flydigi devices with their heartbeat. Opening a device briefly detaches its kernel driver.
-    pub fn list() -> Result<Vec<Found>> {
+    /// Lists all Flydigi devices, with their heartbeat if `probe` is set.
+    ///
+    /// `probe` briefly disconnects every controller from its kernel driver (games see them disconnect and
+    /// reconnect), because the heartbeat can only be read by claiming the device.
+    pub fn list(probe: bool) -> Result<Vec<Found>> {
         Ok(candidates()?
             .into_iter()
             .map(|cand| {
-                let info = Transport::open(&cand).and_then(Self::init).ok().and_then(|c| c.probe());
-                Found { location: cand.location(), product: cand.product, info }
+                let info = probe
+                    .then(|| Transport::open(&cand).and_then(Self::init).ok())
+                    .flatten()
+                    .and_then(|c| c.probe());
+                Found { port: cand.port(), product: cand.product, info }
             })
             .collect())
     }
@@ -336,19 +356,16 @@ impl Controller {
         }
     }
 
-    /// The re-enumerated device: the one reporting our MAC, or, if the MAC is unknown, the only device.
+    /// The re-enumerated device: the one back on our USB port, if it reports our MAC (when known).
+    /// Devices on other ports are not opened.
     fn find_again(&self) -> Option<Controller> {
-        let cands = candidates().ok()?;
-        if self.mac.is_none() {
-            return match cands.as_slice() {
-                [cand] => Transport::open(cand).and_then(Self::init).ok(),
-                _ => None,
-            };
+        let port = self.t.port();
+        let cand = candidates().ok()?.into_iter().find(|c| c.port() == port)?;
+        let c = Transport::open(&cand).and_then(Self::init).ok()?;
+        match &self.mac {
+            Some(mac) => (c.probe()?.mac == *mac).then_some(c),
+            None => Some(c),
         }
-        cands.iter().find_map(|cand| {
-            let c = Transport::open(cand).and_then(Self::init).ok()?;
-            (c.probe()?.mac == *self.mac.as_ref()?).then_some(c)
-        })
     }
 
     /// Called after a USB error: waits briefly for the device to disappear and reopens it.

@@ -6,9 +6,10 @@ use flugdiggi::led::Led;
 use flugdiggi::old::{Blob, Controller, Version};
 use flugdiggi::transport::{hex, is_reply};
 
-const USAGE: &str = "usage: flugdiggi [-v] [--device <MAC>] <command>
+const USAGE: &str = "usage: flugdiggi [-v] [--device <port|MAC>] <command>
 
-  list                        list connected Flydigi controllers and their MACs
+  list [--mac]                list connected Flydigi controllers by USB port; --mac also
+                              shows their MACs but briefly disconnects them from games
   info                        device info, active slot, slot versions
   slot [N]                    show or switch the active slot (0-3)
   export <slot> [file.toml]   print or save a slot's config as TOML
@@ -23,7 +24,8 @@ const USAGE: &str = "usage: flugdiggi [-v] [--device <MAC>] <command>
   led-restore <slot> <file>   write a raw LED blob back to a slot
   raw <cmd[:arg...]>...       send read-only commands and print all replies
 
---device is required when several controllers are connected.
+--device is required when several controllers are connected. Selecting by MAC briefly
+disconnects the other controllers from games; selecting by USB port (e.g. 3-3) does not.
 Slots 4-7 are the Switch-mode configs. Every write first saves the slot's previous
 content to flugdiggi-backup-<kind>-slot<N>-<time>.bin in the current directory.";
 
@@ -107,16 +109,25 @@ fn main() -> Result<()> {
     }
 
     if sub == "list" {
-        for f in Controller::list()? {
+        let probe = match arg(1) {
+            None => false,
+            Some("--mac") => true,
+            _ => usage(),
+        };
+        for f in Controller::list(probe)? {
+            if !probe {
+                println!("{}  {}", f.port, f.product);
+                continue;
+            }
             match f.info {
-                Some(i) => println!("{}  {}  {}  firmware {}", f.location, i.mac, f.product, i.firmware),
-                None => println!("{}  (no answer)  {}", f.location, f.product),
+                Some(i) => println!("{}  {}  {}  firmware {}", f.port, i.mac, f.product, i.firmware),
+                None => println!("{}  (no answer)  {}", f.port, f.product),
             }
         }
         return Ok(());
     }
 
-    let mut c = Controller::open_mac(device.as_deref())?;
+    let mut c = Controller::open_device(device.as_deref())?;
     c.t.trace = trace;
 
     match (sub.as_str(), arg(1), arg(2)) {
