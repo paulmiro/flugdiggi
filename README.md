@@ -68,6 +68,24 @@ bottom = ["#8000ff", "#000000", "#000000", "#000000", "#000000", "#000000", "#00
 # same for middle_right, top_right, top_left, middle_left
 ```
 
+## Buttons (`export` / `import`)
+
+```toml
+[buttons]          # only buttons that do something other than themselves
+c = "ls"
+m1 = "b"
+
+[turbo.a]          # only buttons with turbo
+rate = 10          # presses per second (1-30 in the official app)
+mode = "hold"      # "hold" (while pressed), "toggle" (on/off by click) or "off"
+```
+
+- A button left out of `[buttons]` acts as itself; extra buttons without an Xbox equivalent (`c`, `z`,
+  `m1`-`m6`) then send nothing. `a = "a"` is the same as leaving `a` out.
+- Button names: `up right down left a b x y select start lb rb lt rt ls rs c z m1`-`m6 menu turbo home back`.
+- Targets are the same names, or `macro` (button runs its macro, see `[macros]`).
+- Entries you don't change keep their exact bytes.
+
 ## Rumble (`export` / `import`)
 
 - `rumble.enabled`: the official app's "Controller Vibration" switch. When false the controller ignores all
@@ -75,7 +93,7 @@ bottom = ["#8000ff", "#000000", "#000000", "#000000", "#000000", "#000000", "#00
   intensity in %, `min`/`max` (0-255) are only exposed in the app's debug mode.
 - `trigger_rumble.enabled`: the app's "Trigger Vibration" switch. In `linear`, `scale` is the intensity in %,
   `filter` the "masked value" (weaker rumble is ignored), `min_level`/`max_level` the amplitude range.
-  Plain XInput rumble did not make the triggers vibrate in tests.
+  The Vader 4 Pro has no trigger motors (teardown), so this block has no effect on it.
 - `trigger_adapter` (adaptive triggers) is only used by the Apex series and kept as raw bytes.
 
 ## Controller quirks this works around

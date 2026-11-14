@@ -19,12 +19,12 @@ fn main() -> Result<()> {
     ensure!(c.read_blob(Blob::Mapping, SLOT)? == orig, "slot {SLOT} does not match the original file");
 
     let mut cfg = Config::decode(&orig)?;
-    cfg.buttons[22].map_to = "lb".into();
+    cfg.buttons.set("m5", "lb".into());
     let stored = c.write_config(SLOT, &cfg.apply(&orig)?, None)?;
     println!("written; active {}, versions {:04x?}", c.current_config_id()?.0, c.config_versions()?);
     let back = c.read_config(SLOT)?;
     println!("after switching away and back: {}", if back == stored { "edit KEPT" } else { "edit LOST" });
-    println!("m5 maps to {}", Config::decode(&back)?.buttons[22].map_to);
+    println!("m5 maps to {}", Config::decode(&back)?.buttons.get("m5").map_or("itself", |s| s.as_str()));
 
     let version = u16::from_le_bytes([orig[225], orig[226]]);
     c.write_config(SLOT, &orig, Some(version))?;

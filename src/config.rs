@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 pub const CONFIG_LEN: usize = 840;
 
 const KEYS: (usize, usize) = (13, 109);
+const BUTTONS: usize = 32;
 const STICKS: usize = 109;
 const TRIGGERS: usize = 123;
 const MOTION: usize = 137;
@@ -56,8 +57,13 @@ pub struct Config {
     /// Read-only: random id the app changes on every permanent save.
     pub data_version: u16,
     pub name: String,
-    /// Per physical button (by name); only buttons present in the blob's 32-entry table.
-    pub buttons: Vec<Button>,
+    /// Button remaps (`m1 = "a"`): a key name, "macro" or "keyboard". Buttons left out act as
+    /// themselves (extra buttons without an Xbox equivalent then send nothing).
+    #[serde(default)]
+    pub buttons: Named<String>,
+    /// Turbo per button; buttons left out have no turbo.
+    #[serde(default)]
+    pub turbo: Named<Turbo>,
     pub left_stick: Stick,
     pub right_stick: Stick,
     pub left_trigger: Curve,
@@ -71,15 +77,78 @@ pub struct Config {
     pub trigger_adapter: Vec<u8>,
 }
 
+/// A TOML table keyed by button name, kept in button-table order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Named<T>(pub Vec<(String, T)>);
+
+impl<T> Default for Named<T> {
+    fn default() -> Self {
+        Named(Vec::new())
+    }
+}
+
+impl<T> Named<T> {
+    pub fn get(&self, name: &str) -> Option<&T> {
+        self.0.iter().find(|(n, _)| n == name).map(|(_, v)| v)
+    }
+
+    pub fn set(&mut self, name: &str, value: T) {
+        match self.0.iter_mut().find(|(n, _)| n == name) {
+            Some(e) => e.1 = value,
+            None => {
+                self.0.push((name.to_string(), value));
+                self.0.sort_by_key(|(n, _)| key_id(n).unwrap_or(u8::MAX));
+            }
+        }
+    }
+}
+
+impl<T: Serialize> Serialize for Named<T> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_map(self.0.iter().map(|(k, v)| (k, v)))
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Named<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let m = std::collections::BTreeMap::<String, T>::deserialize(d)?;
+        let mut v: Vec<(String, T)> = m.into_iter().collect();
+        v.sort_by_key(|(n, _)| key_id(n).unwrap_or(u8::MAX));
+        Ok(Named(v))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Button {
-    pub button: String,
-    /// "default", a key name, "macro" or "keyboard".
-    pub map_to: String,
-    /// Turbo: 0 = off, otherwise the firmware's frequency value.
-    pub turbo: u8,
-    /// Turbo activation: 0 = off, 1 = while pressed, 2 = toggled by click.
-    pub turbo_mode: u8,
+pub struct Turbo {
+    /// Turbo rate, 1-30 in the official app.
+    pub rate: u8,
+    /// "hold" (while pressed), "toggle" (on/off by click) or "off".
+    pub mode: String,
+}
+
+const TURBO_MODES: &[(u8, &str)] = &[(0, "off"), (1, "hold"), (2, "toggle")];
+
+fn turbo_mode_name(id: u8) -> String {
+    TURBO_MODES.iter().find(|(i, _)| *i == id).map(|(_, n)| n.to_string()).unwrap_or(format!("mode{id}"))
+}
+
+fn turbo_mode_id(name: &str) -> Result<u8> {
+    if let Some((i, _)) = TURBO_MODES.iter().find(|(_, n)| *n == name) {
+        return Ok(*i);
+    }
+    name.strip_prefix("mode").and_then(|n| n.parse().ok()).ok_or_else(|| anyhow::anyhow!("unknown turbo mode {name:?}"))
+}
+
+const TARGET_DEFAULT: u8 = 0xff;
+const TARGET_MACRO: u8 = 32;
+const TARGET_KEYBOARD: u8 = 0xfe;
+
+fn target_name(id: u8) -> String {
+    match id {
+        TARGET_MACRO => "macro".into(),
+        TARGET_KEYBOARD => "keyboard".into(),
+        k => key_name(k),
+    }
 }
 
 /// A response curve as stored by the firmware (raw 0..=127-ish units).
@@ -129,7 +198,7 @@ pub struct RumbleMotor {
 /// Trigger rumble ("Trigger Vibration" in the official app).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TriggerRumble {
-    /// The app's on/off switch. On a Vader 4 Pro the triggers did not vibrate with host rumble even when on.
+    /// The app's on/off switch. The Vader 4 Pro has no trigger motors, so this block has no effect there.
     pub enabled: bool,
     pub left: TriggerMotor,
     pub right: TriggerMotor,
@@ -295,19 +364,17 @@ impl Config {
         if d.len() != CONFIG_LEN || d[1] != 3 {
             bail!("unsupported config blob (length {}, version byte {:#04x})", d.len(), d.get(1).unwrap_or(&0));
         }
-        let buttons = (0..32)
-            .map(|i| {
-                let e = &d[KEYS.0 + 3 * i..KEYS.0 + 3 * i + 3];
-                let map_to = match e[0] {
-                    0xff => "default".to_string(),
-                    32 => "macro".to_string(),
-                    0xfe => "keyboard".to_string(),
-                    k if k > 32 => "default".to_string(),
-                    k => key_name(k),
-                };
-                Button { button: key_name(i as u8), map_to, turbo: e[2], turbo_mode: e[1] }
-            })
-            .collect();
+        let (mut buttons, mut turbo) = (Named(Vec::new()), Named(Vec::new()));
+        for i in 0..BUTTONS {
+            let e = &d[KEYS.0 + 3 * i..KEYS.0 + 3 * i + 3];
+            let name = key_name(i as u8);
+            if e[0] != TARGET_DEFAULT {
+                buttons.0.push((name.clone(), target_name(e[0])));
+            }
+            if e[2] != 0 {
+                turbo.0.push((name, Turbo { rate: e[2], mode: turbo_mode_name(e[1]) }));
+            }
+        }
         let stick = |i: usize| {
             let x = STICKS_EXTRA + 12 * i;
             Stick {
@@ -334,6 +401,7 @@ impl Config {
             data_version: u16::from_le_bytes([d[DATA_VERSION], d[DATA_VERSION + 1]]),
             name: String::from_utf16_lossy(&name_units),
             buttons,
+            turbo,
             left_stick: stick(0),
             right_stick: stick(1),
             left_trigger: Curve::decode(&d[TRIGGERS..]),
@@ -376,24 +444,44 @@ impl Config {
                 d[NAME.0 + 2 * i..NAME.0 + 2 * i + 2].copy_from_slice(&u.to_le_bytes());
             }
         }
-        if self.buttons.len() != 32 {
-            bail!("buttons must list all 32 entries");
-        }
-        for (i, (b, old)) in self.buttons.iter().zip(&cur.buttons).enumerate() {
-            if b.button != old.button {
-                bail!("button entries must keep their order (entry {i} is {:?})", old.button);
+        for (table, names) in [("buttons", self.buttons.0.iter().map(|e| &e.0).collect::<Vec<_>>()),
+                               ("turbo", self.turbo.0.iter().map(|e| &e.0).collect())] {
+            for n in names {
+                if !matches!(key_id(n), Ok(i) if (i as usize) < BUTTONS) {
+                    bail!("[{table}]: {n:?} is not a button of the mapping table");
+                }
             }
-            if b == old {
+        }
+        for i in 0..BUTTONS {
+            let name = key_name(i as u8);
+            let (target, old_target) = (self.buttons.get(&name), cur.buttons.get(&name));
+            let (turbo, old_turbo) = (self.turbo.get(&name), cur.turbo.get(&name));
+            if target == old_target && turbo == old_turbo {
                 continue;
             }
-            let target = match b.map_to.as_str() {
-                "default" => 0xff,
-                "macro" => 32,
-                "keyboard" => bail!("keyboard mapping is not supported"),
-                k => key_id(k)?,
-            };
             let o = KEYS.0 + 3 * i;
-            d[o..o + 3].copy_from_slice(&[target, b.turbo_mode, b.turbo]);
+            if target != old_target {
+                d[o] = match target.map(String::as_str) {
+                    None => TARGET_DEFAULT,
+                    Some("macro") => TARGET_MACRO,
+                    Some("keyboard") => bail!("keyboard mapping is not supported"),
+                    Some(k) => match key_id(k)? {
+                        id if id as usize == i => TARGET_DEFAULT,
+                        id => id,
+                    },
+                };
+            }
+            match turbo {
+                // Without turbo the mode byte is meaningless; keep whatever the slot had.
+                None => d[o + 2] = 0,
+                Some(t) => {
+                    if t.rate == 0 {
+                        bail!("[turbo] {name}: rate must be at least 1 (remove the entry to disable turbo)");
+                    }
+                    d[o + 1] = turbo_mode_id(&t.mode)?;
+                    d[o + 2] = t.rate;
+                }
+            }
         }
         for (i, (s, old)) in [(&self.left_stick, &cur.left_stick), (&self.right_stick, &cur.right_stick)].into_iter().enumerate() {
             if s.curve != old.curve {
@@ -524,10 +612,39 @@ mod tests {
     fn remap_changes_only_that_entry() {
         let b = &backups()[0];
         let mut c = Config::decode(b).unwrap();
-        c.buttons[18].map_to = "lb".into();
+        c.buttons.set("m1", "lb".into());
         let d = c.apply(b).unwrap();
         let diff: Vec<usize> = (0..d.len()).filter(|&i| d[i] != b[i]).collect();
         assert_eq!(diff, vec![KEYS.0 + 3 * 18]);
-        assert_eq!(Config::decode(&d).unwrap().buttons[18].map_to, "lb");
+        assert_eq!(Config::decode(&d).unwrap().buttons.get("m1").unwrap(), "lb");
+    }
+
+    #[test]
+    fn omitted_or_self_mapped_buttons_act_as_themselves() {
+        let mut b = backups()[0].clone();
+        b[KEYS.0 + 3 * 18] = 4; // m1 -> a
+        b[KEYS.0 + 3 * 16] = 14; // c -> ls
+        let mut c = Config::decode(&b).unwrap();
+        assert_eq!(c.buttons.get("m1").unwrap(), "a");
+        c.buttons.0.retain(|(n, _)| n != "m1");
+        c.buttons.set("c", "c".into());
+        let d = c.apply(&b).unwrap();
+        assert_eq!(d[KEYS.0 + 3 * 18], TARGET_DEFAULT);
+        assert_eq!(d[KEYS.0 + 3 * 16], TARGET_DEFAULT);
+        let diff: Vec<usize> = (0..d.len()).filter(|&i| d[i] != b[i]).collect();
+        assert_eq!(diff, vec![KEYS.0 + 3 * 16, KEYS.0 + 3 * 18]);
+    }
+
+    #[test]
+    fn turbo_round_trip_and_validation() {
+        let b = &backups()[0];
+        let mut c = Config::decode(b).unwrap();
+        c.turbo.set("a", Turbo { rate: 10, mode: "toggle".into() });
+        let d = c.apply(b).unwrap();
+        assert_eq!(&d[KEYS.0 + 12..KEYS.0 + 15], &[b[KEYS.0 + 12], 2, 10]);
+        let back = Config::decode(&d).unwrap();
+        assert_eq!(back.turbo.get("a").unwrap().mode, "toggle");
+        c.buttons.set("nope", "a".into());
+        assert!(c.apply(b).is_err());
     }
 }
