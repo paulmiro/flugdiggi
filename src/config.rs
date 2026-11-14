@@ -2,6 +2,8 @@
 //!
 //! Offsets follow `MappingConfigParserV30`/`V31` of the official SDK. `Config::apply` only re-encodes
 //! sections whose decoded value changed, so bytes we don't model are preserved exactly.
+//! Unmodelled: 2 package length, 3-12 legacy LED block (superseded by the LED blob),
+//! 183-184 dial ("Lunpan") mapping, 227-229 and the tail bytes reserved (0xff).
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
@@ -64,7 +66,8 @@ pub struct Config {
     pub trigger_rumble: TriggerRumble,
     pub motion: Motion,
     pub macros: Macros,
-    /// Raw adaptive-trigger blocks (40 bytes, 2 × 20); semantics not yet modelled.
+    /// Raw adaptive-trigger blocks (2 × 20 bytes: mode, vibration binding, mixed-mode params).
+    /// Only used by the Apex series; the Vader 4 ignores them.
     pub trigger_adapter: Vec<u8>,
 }
 
@@ -101,26 +104,33 @@ pub struct Stick {
     pub edge: u8,
 }
 
+/// Grip rumble ("Controller Vibration" in the official app).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Rumble {
-    /// Raw main switch byte. The SDK treats 0 as "on", but the stock configs read 1 here.
-    pub main_switch: u8,
+    /// When false the controller ignores all rumble from the host (verified on hardware).
+    pub enabled: bool,
+    /// Left (low-frequency) motor.
     pub left: RumbleMotor,
+    /// Right (high-frequency) motor.
     pub right: RumbleMotor,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RumbleMotor {
-    pub enabled: bool,
+    /// Motor type; not exposed by the official app.
+    pub kind: u8,
+    /// Output range 0-255; only editable in the official app's debug mode.
     pub min: u8,
     pub max: u8,
+    /// Vibration intensity in % (the app keeps both motors equal).
     pub scale: u8,
 }
 
+/// Trigger rumble ("Trigger Vibration" in the official app).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TriggerRumble {
-    /// Raw main switch byte. The SDK writes 0 for "on" and 1 for "off"; stock configs read 1.
-    pub main_switch: u8,
+    /// The app's on/off switch. On a Vader 4 Pro the triggers did not vibrate with host rumble even when on.
+    pub enabled: bool,
     pub left: TriggerMotor,
     pub right: TriggerMotor,
 }
@@ -131,14 +141,21 @@ pub struct TriggerMotor {
     pub micro: MotorSetting,
 }
 
+/// The app only edits `linear` (both triggers alike, except min/max); `micro` and the
+/// remaining fields are not exposed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MotorSetting {
     pub kind: u8,
+    /// Amplitude range 0-255 (shown as 0-100 in the app).
     pub min_level: u8,
     pub max_level: u8,
+    /// "Masked value": rumble below this is ignored.
     pub filter: u8,
+    /// `Vibrlimit` in the SDK.
     pub min_start: u8,
+    /// Vibration intensity in %.
     pub scale: u8,
+    /// `TimeLimit` in the SDK.
     pub min_time: u8,
 }
 
@@ -301,7 +318,7 @@ impl Config {
                 edge: d[x + 11],
             }
         };
-        let motor = |o: usize| RumbleMotor { enabled: d[o] == 0, min: d[o + 1], max: d[o + 2], scale: d[o + 3] };
+        let motor = |o: usize| RumbleMotor { kind: d[o], min: d[o + 1], max: d[o + 2], scale: d[o + 3] };
         let tmotor = |i: usize| TriggerMotor {
             linear: MotorSetting::decode(&d[TRIGGER_RUMBLE + 1 + 14 * i..]),
             micro: MotorSetting::decode(&d[TRIGGER_RUMBLE + 8 + 14 * i..]),
@@ -321,8 +338,8 @@ impl Config {
             right_stick: stick(1),
             left_trigger: Curve::decode(&d[TRIGGERS..]),
             right_trigger: Curve::decode(&d[TRIGGERS + 7..]),
-            rumble: Rumble { main_switch: d[RUMBLE], left: motor(RUMBLE + 1), right: motor(RUMBLE + 5) },
-            trigger_rumble: TriggerRumble { main_switch: d[TRIGGER_RUMBLE], left: tmotor(0), right: tmotor(1) },
+            rumble: Rumble { enabled: d[RUMBLE] == 0, left: motor(RUMBLE + 1), right: motor(RUMBLE + 5) },
+            trigger_rumble: TriggerRumble { enabled: d[TRIGGER_RUMBLE] == 0, left: tmotor(0), right: tmotor(1) },
             motion: Motion {
                 map_to: m[0],
                 enable_key: key_name(m[1]),
@@ -399,14 +416,18 @@ impl Config {
         }
         if self.rumble != cur.rumble {
             let r = &self.rumble;
-            d[RUMBLE] = r.main_switch;
+            if r.enabled != cur.rumble.enabled {
+                d[RUMBLE] = !r.enabled as u8;
+            }
             for (o, m) in [(RUMBLE + 1, &r.left), (RUMBLE + 5, &r.right)] {
-                d[o..o + 4].copy_from_slice(&[if m.enabled { 0 } else { 0xff }, m.min, m.max, m.scale]);
+                d[o..o + 4].copy_from_slice(&[m.kind, m.min, m.max, m.scale]);
             }
         }
         if self.trigger_rumble != cur.trigger_rumble {
             let t = &self.trigger_rumble;
-            d[TRIGGER_RUMBLE] = t.main_switch;
+            if t.enabled != cur.trigger_rumble.enabled {
+                d[TRIGGER_RUMBLE] = !t.enabled as u8;
+            }
             for (i, m) in [&t.left, &t.right].into_iter().enumerate() {
                 m.linear.encode(&mut d[TRIGGER_RUMBLE + 1 + 14 * i..]);
                 m.micro.encode(&mut d[TRIGGER_RUMBLE + 8 + 14 * i..]);
@@ -486,6 +507,17 @@ mod tests {
             encode_macros(&c.macros.list, &mut d[MACROS.0..MACROS.1]).unwrap();
             assert_eq!(Config::decode(&d).unwrap(), c, "macros re-encode changes meaning");
         }
+    }
+
+    #[test]
+    fn rumble_switch_changes_only_its_byte() {
+        let b = &backups()[0];
+        let mut c = Config::decode(b).unwrap();
+        c.rumble.enabled = !c.rumble.enabled;
+        let d = c.apply(b).unwrap();
+        let diff: Vec<usize> = (0..d.len()).filter(|&i| d[i] != b[i]).collect();
+        assert_eq!(diff, vec![RUMBLE]);
+        assert_eq!(d[RUMBLE], !c.rumble.enabled as u8);
     }
 
     #[test]

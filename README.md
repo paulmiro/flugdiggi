@@ -68,6 +68,16 @@ bottom = ["#8000ff", "#000000", "#000000", "#000000", "#000000", "#000000", "#00
 # same for middle_right, top_right, top_left, middle_left
 ```
 
+## Rumble (`export` / `import`)
+
+- `rumble.enabled`: the official app's "Controller Vibration" switch. When false the controller ignores all
+  rumble from the host. `left` is the low-frequency, `right` the high-frequency grip motor; `scale` is the
+  intensity in %, `min`/`max` (0-255) are only exposed in the app's debug mode.
+- `trigger_rumble.enabled`: the app's "Trigger Vibration" switch. In `linear`, `scale` is the intensity in %,
+  `filter` the "masked value" (weaker rumble is ignored), `min_level`/`max_level` the amplitude range.
+  Plain XInput rumble did not make the triggers vibrate in tests.
+- `trigger_adapter` (adaptive triggers) is only used by the Apex series and kept as raw bytes.
+
 ## Controller quirks this works around
 
 - The controller never sends a reply identical to its previous reply, so repeated commands need a
