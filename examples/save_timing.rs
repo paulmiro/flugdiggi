@@ -21,16 +21,16 @@ fn main() -> Result<()> {
     let (orig, _) = c.current_config_id()?;
 
     c.apply_config(0)?;
-    c.apply_config(SLOT)?;
+    let mut edit = c.edit(SLOT)?;
     let led = c.read_blob(Blob::Led, SLOT)?;
     let map = c.read_blob(Blob::Mapping, SLOT)?;
     let mut new_led = led.clone();
     new_led[BRIGHTNESS] = if led[BRIGHTNESS] == 30 { 70 } else { 30 };
     let version = u16::from_le_bytes([map[225], map[226]]);
-    c.write_blob_partial(Blob::Led, SLOT, 0, &[&new_led[..10]])?;
-    c.write_blob_partial(Blob::Mapping, SLOT, NAME_PACKET as u8, &[&map[10 * NAME_PACKET..10 * NAME_PACKET + 10]])?;
+    edit.write(Blob::Led, 0, &[&new_led[..10]])?;
+    edit.write(Blob::Mapping, NAME_PACKET, &[&map[10 * NAME_PACKET..10 * NAME_PACKET + 10]])?;
 
-    c.save_active(version)?;
+    edit.save(version)?;
     let saved = Instant::now();
     println!("brightness {} -> {}, saved", led[BRIGHTNESS], new_led[BRIGHTNESS]);
 

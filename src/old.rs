@@ -521,13 +521,10 @@ impl Controller {
     ) -> Result<Option<Vec<u8>>> {
         // The save (0x50 03) stores the controller's whole working copy (mapping + LED) into the active
         // slot, and a partial write to a slot does not load that slot into the working copy. So the slot
-        // is loaded with a real switch first (switching away first if it is active, which also drops
+        // is loaded with a real switch first (not needed if it is already active; flugdiggi never leaves
         // unsaved edits), and afterwards both blobs are verified from flash.
         let away = if slot == 0 { 1 } else { 0 };
-        if self.current_config_id()?.0 == slot {
-            self.apply_config(away)?;
-        }
-        self.apply_config(slot)?;
+        let mut edit = self.edit(slot)?;
         let other_blob = blob.other();
         let other_before = self.read_blob_retrying(other_blob, slot)?;
         let old = self.read_blob_retrying(blob, slot)?;
@@ -562,32 +559,20 @@ impl Controller {
             while i < new_p.len() && old_p[i] != new_p[i] {
                 i += 1;
             }
-            self.write_run(blob, slot, start, &new_p[start..i])?;
+            edit.write(blob, start, &new_p[start..i])?;
         }
         if let Blob::Led = blob {
             // Rewrite one unchanged mapping packet (the name) so the mapping working copy is touched before
             // the save; an LED-only save once stored another slot's mapping into this slot.
             let name = 77;
-            self.write_run(Blob::Mapping, slot, name, &[&other_before[10 * name..10 * name + 10]])?;
+            edit.write(Blob::Mapping, name, &[&other_before[10 * name..10 * name + 10]])?;
         }
-        // Sometimes (after saves) the controller falls into a mode with one read packet per 40 ms instead of
-        // 4-14 ms, lags behind and keeps streaming old transfers. Saves made while it still streamed were lost
-        // or stored an outdated LED config, so the stream is drained first.
-        let stale = self.drain_quiet(Duration::from_millis(300), Duration::from_secs(15));
-        if stale > 0 {
-            eprintln!("discarded {stale} unrequested replies before saving");
-        }
-        if self.current_config_id()?.0 != slot {
-            bail!("slot {slot} is no longer active before saving; not saving");
-        }
-        self.save_active(version)?;
+        edit.save(version)?;
         self.wait_save_committed()?;
         // Reload from flash and verify both blobs. Reading a slot right after switching away from it can
         // return the newly active slot's data, so the slot is switched to explicitly before reading.
         self.apply_config(away)?;
-        std::thread::sleep(Duration::from_secs(1));
         self.apply_config(slot)?;
-        std::thread::sleep(Duration::from_millis(500));
         let mut other_expected = other_before;
         if let Blob::Mapping = other_blob {
             let v = crate::config::DATA_VERSION;
@@ -622,6 +607,12 @@ impl Controller {
         Ok(Some(new))
     }
 
+    /// Loads `slot` into the working copy (by making it active) for editing.
+    pub fn edit(&self, slot: u8) -> Result<Edit<'_>> {
+        self.apply_config(slot)?;
+        Ok(Edit { c: self, slot, dirty: false })
+    }
+
     /// Partial write of one run of packets. A failed transfer is restarted from its start command,
     /// because the controller counts received packets and drops transfers with a wrong count.
     fn write_run(&self, blob: Blob, slot: u8, start: usize, packets: &[&[u8]]) -> Result<()> {
@@ -653,7 +644,7 @@ impl Controller {
 
 impl Controller {
     /// Partially writes consecutive packets starting at packet `start` (live edit, not persisted by itself).
-    pub fn write_blob_partial(&self, blob: Blob, slot: u8, start: u8, packets: &[&[u8]]) -> Result<()> {
+    fn write_blob_partial(&self, blob: Blob, slot: u8, start: u8, packets: &[&[u8]]) -> Result<()> {
         let s = blob.partial_cmd();
         self.separator(0x10)?;
         self.send(&cmd(s, &[start, packets.len() as u8, 0xa0, slot]))?;
@@ -710,7 +701,7 @@ impl Controller {
     }
 
     /// "Permanent save" (0x50 03) of the active slot's working copy with a new data version.
-    pub fn save_active(&self, version: u16) -> Result<()> {
+    fn save_active(&self, version: u16) -> Result<()> {
         let [lo, hi] = version.to_le_bytes();
         self.request_timeout(&cmd(0x50, &[3, lo, hi]), Duration::from_secs(10), |p| p[15] == 0x50 && p[16] == 3)?;
         Ok(())
@@ -730,6 +721,54 @@ fn new_version(current: u16) -> u16 {
         let v = seed as u16;
         if v != current {
             return v;
+        }
+    }
+}
+
+/// Unsaved edits of a slot's working copy. Partial writes are only possible through this, and it ends either
+/// with `save` or, when dropped without a successful save, by discarding the edits (switching away and back).
+/// So no other operation, in particular a later write that skips loading the already active slot, can see
+/// or save leftover edits.
+#[must_use = "dropping an Edit discards its writes"]
+pub struct Edit<'a> {
+    c: &'a Controller,
+    slot: u8,
+    dirty: bool,
+}
+
+impl Edit<'_> {
+    /// Writes consecutive packets starting at packet `start` into the working copy (RAM only).
+    pub fn write(&mut self, blob: Blob, start: usize, packets: &[&[u8]]) -> Result<()> {
+        self.dirty = true;
+        self.c.write_run(blob, self.slot, start, packets)
+    }
+
+    /// Saves the whole working copy (mapping and LED) into the slot with data version `version`.
+    /// Returns once the save is acknowledged; the flash write happens afterwards.
+    pub fn save(mut self, version: u16) -> Result<()> {
+        // Sometimes (after saves) the controller falls into a mode with one read packet per 40 ms instead of
+        // 4-14 ms, lags behind and keeps streaming old transfers. Saves made while it still streamed were lost
+        // or stored an outdated LED config, so the stream is drained first.
+        let stale = self.c.drain_quiet(Duration::from_millis(300), Duration::from_secs(15));
+        if stale > 0 {
+            eprintln!("discarded {stale} unrequested replies before saving");
+        }
+        if self.c.current_config_id()?.0 != self.slot {
+            bail!("slot {} is no longer active before saving; not saving", self.slot);
+        }
+        self.c.save_active(version)?;
+        self.dirty = false;
+        Ok(())
+    }
+}
+
+impl Drop for Edit<'_> {
+    fn drop(&mut self) {
+        if self.dirty {
+            let away = if self.slot == 0 { 1 } else { 0 };
+            if self.c.apply_config(away).and_then(|()| self.c.apply_config(self.slot)).is_err() {
+                eprintln!("could not discard unsaved edits of slot {}", self.slot);
+            }
         }
     }
 }
