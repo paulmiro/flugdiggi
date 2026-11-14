@@ -26,6 +26,9 @@ pub struct Transport {
 pub struct Candidate {
     dev: rusb::Device<GlobalContext>,
     pub product: String,
+    /// Guessed without claiming the device: a wired Vader 4 Pro stalls the manufacturer string request,
+    /// the dongle answers it.
+    pub wired: bool,
 }
 
 impl Candidate {
@@ -51,10 +54,12 @@ pub fn candidates() -> Result<Vec<Candidate>> {
         }
         let Ok(handle) = dev.open() else { continue };
         // A wired Vader 4 Pro stalls the manufacturer string request.
-        let manufacturer = handle.read_manufacturer_string_ascii(&desc).unwrap_or_default();
+        let manufacturer = handle.read_manufacturer_string_ascii(&desc);
+        let wired = manufacturer.is_err();
+        let manufacturer = manufacturer.unwrap_or_default();
         let product = handle.read_product_string_ascii(&desc).unwrap_or_default();
         if manufacturer.eq_ignore_ascii_case("flydigi") || product.to_ascii_lowercase().contains("flydigi") {
-            out.push(Candidate { dev, product });
+            out.push(Candidate { dev, product, wired });
         }
     }
     Ok(out)

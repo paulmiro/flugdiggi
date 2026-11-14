@@ -115,13 +115,11 @@ fn main() -> Result<()> {
             _ => usage(),
         };
         for f in Controller::list(probe)? {
-            if !probe {
-                println!("{}  {}", f.port, f.product);
-                continue;
-            }
-            match f.info {
-                Some(i) => println!("{}  {}  {}  firmware {}", f.port, i.mac, f.product, i.firmware),
-                None => println!("{}  (no answer)  {}", f.port, f.product),
+            let conn = if f.wired { "cable " } else { "dongle" };
+            match (probe, f.info) {
+                (false, _) => println!("{}  {conn}  {}", f.port, f.product),
+                (true, Some(i)) => println!("{}  {conn}  {}  {}  firmware {}", f.port, i.mac, f.product, i.firmware),
+                (true, None) => println!("{}  {conn}  (no answer)  {}", f.port, f.product),
             }
         }
         return Ok(());

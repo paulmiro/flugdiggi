@@ -42,6 +42,8 @@ pub struct Controller {
 /// A Flydigi USB device and the heartbeat it answered with (None if it didn't answer).
 pub struct Found {
     pub port: String,
+    /// From the heartbeat if available, else guessed from the USB descriptors.
+    pub wired: bool,
     pub product: String,
     pub info: Option<DeviceInfo>,
 }
@@ -251,7 +253,8 @@ impl Controller {
                     .then(|| Transport::open(&cand).and_then(Self::init).ok())
                     .flatten()
                     .and_then(|c| c.probe());
-                Found { port: cand.port(), product: cand.product, info }
+                let wired = info.as_ref().map_or(cand.wired, |i| i.wired);
+                Found { port: cand.port(), product: cand.product, wired, info }
             })
             .collect())
     }
