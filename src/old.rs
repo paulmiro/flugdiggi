@@ -119,6 +119,16 @@ impl std::fmt::Display for StartIgnored {
 
 impl std::error::Error for StartIgnored {}
 
+/// The data version a write saves with.
+#[derive(Debug, Clone, Copy)]
+pub enum Version {
+    /// A new random version (what the official app does on every save).
+    New,
+    /// The slot's current version.
+    Keep,
+    Exact(u16),
+}
+
 /// A plausible active-slot (0x20) reply. Replies are sometimes torn: bytes 15-17 still hold the previous
 /// reply while the rest is the new one, or vice versa. A torn reply once reported the device type (105)
 /// as the active slot, and switching to it put the controller on a nonexistent config.
@@ -283,10 +293,15 @@ impl Controller {
         let switch = cmd(0x50, &[5, slot]);
         let start = Instant::now();
         let mut last_switch: Option<Instant> = None;
+        // About a quarter of switch commands are ignored; most switches complete within 250 ms. So resend
+        // soon, then less often in case the controller is unresponsive for longer.
+        let mut resend_after = Duration::from_millis(400);
         while start.elapsed() < UNRESPONSIVE_MAX {
             let r = (|| {
-                // The switch command itself can be ignored while the controller is unresponsive.
-                if last_switch.is_none_or(|t| t.elapsed() > Duration::from_millis(1500)) {
+                if last_switch.is_none_or(|t| t.elapsed() > resend_after) {
+                    if last_switch.is_some() {
+                        resend_after = (resend_after * 2).min(Duration::from_millis(3200));
+                    }
                     self.send(&switch)?;
                     last_switch = Some(Instant::now());
                 }
@@ -404,14 +419,36 @@ impl Controller {
     /// Returns the blob as stored (a mapping config's data version changes).
     /// `version` is the data version to save with; `None` picks a new random one.
     pub fn write_blob(&self, blob: Blob, slot: u8, data: &[u8], version: Option<u16>) -> Result<Vec<u8>> {
+        let version = version.map_or(Version::New, Version::Exact);
+        Ok(self.write_blob_with(blob, slot, |_| Ok(data.to_vec()), version)?.unwrap_or_else(|| data.to_vec()))
+    }
+
+    /// Like `write_blob`, but the new content is computed by `make` from the slot's current content, read
+    /// once after loading the slot. Returns `None` if the content is unchanged (nothing is written).
+    pub fn write_blob_with(
+        &self,
+        blob: Blob,
+        slot: u8,
+        make: impl FnOnce(&[u8]) -> Result<Vec<u8>>,
+        version: Version,
+    ) -> Result<Option<Vec<u8>>> {
         let (active, switch_slot) = self.current_config_id()?;
-        let mut result = self.write_blob_inner(blob, slot, data, version, true);
+        // Retries reload the slot, so `make` is called once and its result reused.
+        let mut make = Some(make);
+        let mut data: Option<Vec<u8>> = None;
+        let mut get = |old: &[u8]| -> Result<Vec<u8>> {
+            if let Some(make) = make.take() {
+                data = Some(make(old)?);
+            }
+            Ok(data.clone().expect("make failed earlier"))
+        };
+        let mut result = self.write_blob_inner(blob, slot, &mut get, version, true);
         for _ in 1..RETRIES {
             if !result.as_ref().is_err_and(|e| e.is::<StartIgnored>()) {
                 break;
             }
             eprintln!("the controller ignored the write; reloading slot {slot} and writing again");
-            result = self.write_blob_inner(blob, slot, data, version, true);
+            result = self.write_blob_inner(blob, slot, &mut get, version, true);
         }
         // Switching to a Switch-mode slot (4-7) also makes it the Switch-mode slot; switching to the
         // previous one first restores that.
@@ -422,7 +459,14 @@ impl Controller {
         result
     }
 
-    fn write_blob_inner(&self, blob: Blob, slot: u8, data: &[u8], version: Option<u16>, retry: bool) -> Result<Vec<u8>> {
+    fn write_blob_inner(
+        &self,
+        blob: Blob,
+        slot: u8,
+        make: &mut dyn FnMut(&[u8]) -> Result<Vec<u8>>,
+        version: Version,
+        retry: bool,
+    ) -> Result<Option<Vec<u8>>> {
         // The save (0x50 03) stores the controller's whole working copy (mapping + LED) into the active
         // slot, and a partial write to a slot does not load that slot into the working copy. So the slot
         // is loaded with a real switch first (switching away first if it is active, which also drops
@@ -435,16 +479,21 @@ impl Controller {
         let other_blob = blob.other();
         let other_before = self.read_blob_retrying(other_blob, slot)?;
         let old = self.read_blob_retrying(blob, slot)?;
+        let data = make(&old)?;
         if old.len() != data.len() {
             bail!("{blob:?} data must be {} bytes", old.len());
         }
         if old == data {
-            return Ok(old);
+            return Ok(None);
         }
         let mapping = if let Blob::Mapping = blob { &old } else { &other_before };
         let v = crate::config::DATA_VERSION;
         let current = u16::from_le_bytes([mapping[v], mapping[v + 1]]);
-        let version = version.unwrap_or_else(|| new_version(current));
+        let version = match version {
+            Version::New => new_version(current),
+            Version::Keep => current,
+            Version::Exact(v) => v,
+        };
         let mut new = data.to_vec();
         if let Blob::Mapping = blob {
             new[crate::config::DATA_VERSION..crate::config::DATA_VERSION + 2].copy_from_slice(&version.to_le_bytes());
@@ -490,7 +539,7 @@ impl Controller {
             let only_keys = (0..new.len()).filter(|&i| back[i] != new[i]).all(|i| keys.contains(&i));
             if retry && matches!(blob, Blob::Mapping) && only_keys {
                 eprintln!("button table of slot {slot} differs after writing; writing it again");
-                return self.write_blob_inner(blob, slot, data, Some(version), false);
+                return self.write_blob_inner(blob, slot, make, Version::Exact(version), false);
             }
             bail!("read-back of slot {slot} differs from what was written");
         }
@@ -507,7 +556,7 @@ impl Controller {
                 .collect();
             bail!("the {other_blob:?} config of slot {slot} changed unexpectedly while saving: {diff:?}");
         }
-        Ok(new)
+        Ok(Some(new))
     }
 
     /// Partial write of one run of packets. A failed transfer is restarted from its start command,

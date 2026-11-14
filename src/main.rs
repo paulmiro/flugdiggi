@@ -3,7 +3,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use flugdiggi::config::Config;
 use flugdiggi::led::Led;
-use flugdiggi::old::{Blob, Controller};
+use flugdiggi::old::{Blob, Controller, Version};
 use flugdiggi::transport::{hex, is_reply};
 
 const USAGE: &str = "usage: flugdiggi [-v] <command>
@@ -45,22 +45,36 @@ fn unix_time() -> u64 {
         .unwrap_or(0)
 }
 
-/// Backs up the slot's current content, writes `new` and reports the result.
-fn write_with_backup(c: &Controller, blob: Blob, slot: u8, new: &[u8], version: Option<u16>) -> Result<()> {
-    let old = c.read_blob(blob, slot)?;
-    if old.len() != new.len() {
-        bail!("new {blob:?} data has {} bytes, expected {}", new.len(), old.len());
+/// Writes the content `make` computes from the slot's current content, after backing that up.
+fn write_with_backup(
+    c: &Controller,
+    blob: Blob,
+    slot: u8,
+    make: impl FnOnce(&[u8]) -> Result<Vec<u8>>,
+    version: Version,
+) -> Result<()> {
+    let written = c.write_blob_with(
+        blob,
+        slot,
+        |old| {
+            let new = make(old)?;
+            if old.len() != new.len() {
+                bail!("new {blob:?} data has {} bytes, expected {}", new.len(), old.len());
+            }
+            if old != new {
+                let kind = if matches!(blob, Blob::Led) { "led" } else { "config" };
+                let backup = format!("flugdiggi-backup-{kind}-slot{slot}-{}.bin", unix_time());
+                std::fs::write(&backup, old)?;
+                println!("previous config of slot {slot} saved to {backup}");
+            }
+            Ok(new)
+        },
+        version,
+    )?;
+    match written {
+        Some(_) => println!("slot {slot} written and verified"),
+        None => println!("slot {slot} already has this config, nothing written"),
     }
-    if old == new {
-        println!("slot {slot} already has this config, nothing written");
-        return Ok(());
-    }
-    let kind = if matches!(blob, Blob::Led) { "led" } else { "config" };
-    let backup = format!("flugdiggi-backup-{kind}-slot{slot}-{}.bin", unix_time());
-    std::fs::write(&backup, &old)?;
-    println!("previous config of slot {slot} saved to {backup}");
-    c.write_blob(blob, slot, new, version)?;
-    println!("slot {slot} written and verified");
     Ok(())
 }
 
@@ -114,15 +128,16 @@ fn main() -> Result<()> {
         ("import", Some(slot), Some(file)) => {
             let slot = parse_slot(slot)?;
             let wanted: Config = toml::from_str(&std::fs::read_to_string(file)?)?;
-            let new = wanted.apply(&c.read_config(slot)?)?;
-            write_with_backup(&c, Blob::Mapping, slot, &new, None)?;
+            write_with_backup(&c, Blob::Mapping, slot, |old| wanted.apply(old), Version::New)?;
         }
         ("rename", Some(slot), Some(name)) => {
             let slot = parse_slot(slot)?;
-            let old = c.read_config(slot)?;
-            let mut cfg = Config::decode(&old)?;
-            cfg.name = name.to_string();
-            write_with_backup(&c, Blob::Mapping, slot, &cfg.apply(&old)?, None)?;
+            let rename = |old: &[u8]| {
+                let mut cfg = Config::decode(old)?;
+                cfg.name = name.to_string();
+                cfg.apply(old)
+            };
+            write_with_backup(&c, Blob::Mapping, slot, rename, Version::New)?;
         }
         ("led-export", Some(slot), file) => {
             let text = toml::to_string(&Led::decode(&c.read_blob(Blob::Led, parse_slot(slot)?)?)?)?;
@@ -134,8 +149,7 @@ fn main() -> Result<()> {
         ("led-import", Some(slot), Some(file)) => {
             let slot = parse_slot(slot)?;
             let wanted: Led = toml::from_str(&std::fs::read_to_string(file)?)?;
-            let new = wanted.apply(&c.read_blob(Blob::Led, slot)?)?;
-            write_with_backup(&c, Blob::Led, slot, &new, None)?;
+            write_with_backup(&c, Blob::Led, slot, |old| wanted.apply(old), Version::New)?;
         }
         ("led-dump", Some(slot), Some(file)) => {
             let data = c.read_blob(Blob::Led, parse_slot(slot)?)?;
@@ -146,9 +160,7 @@ fn main() -> Result<()> {
             let slot = parse_slot(slot)?;
             let new = std::fs::read(file)?;
             Led::decode(&new)?;
-            let m = c.read_config(slot)?;
-            let version = u16::from_le_bytes([m[225], m[226]]);
-            write_with_backup(&c, Blob::Led, slot, &new, Some(version))?;
+            write_with_backup(&c, Blob::Led, slot, |_| Ok(new), Version::Keep)?;
         }
         ("dump", Some(slot), Some(file)) => {
             let data = c.read_config(parse_slot(slot)?)?;
@@ -159,7 +171,8 @@ fn main() -> Result<()> {
             let slot = parse_slot(slot)?;
             let new = std::fs::read(file)?;
             Config::decode(&new)?;
-            write_with_backup(&c, Blob::Mapping, slot, &new, Some(u16::from_le_bytes([new[225], new[226]])))?;
+            let version = Version::Exact(u16::from_le_bytes([new[225], new[226]]));
+            write_with_backup(&c, Blob::Mapping, slot, |_| Ok(new), version)?;
         }
         ("raw", Some(_), _) => {
             for spec in &args[1..] {
