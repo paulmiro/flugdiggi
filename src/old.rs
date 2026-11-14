@@ -23,9 +23,12 @@ const MAX_SLOT: u8 = 7;
 // How long the controller may ignore commands (after switches and saves) before an operation fails.
 // Over the dongle, 20 s was sometimes not enough.
 const UNRESPONSIVE_MAX: Duration = Duration::from_secs(60);
-// 3 s was enough for mapping saves; LED saves corrupted the mapping with 3 s but worked with 8 s
-// (together with touching the mapping working copy, see write_blob_inner).
+// About 1 s after a save the controller is silent for ~1-2 s (the flash write); switching slots after that
+// kept the save in all tests. If no such silence shows up, the wait falls back to SAVE_SETTLE.
+// (Session 1: a fixed 3 s once let an LED save corrupt the mapping, 8 s worked.)
 const SAVE_SETTLE: Duration = Duration::from_secs(8);
+const SAVE_SILENCE_MIN: Duration = Duration::from_millis(500);
+const SAVE_MARGIN: Duration = Duration::from_millis(500);
 
 pub struct Controller {
     pub t: Transport,
@@ -522,9 +525,7 @@ impl Controller {
             bail!("slot {slot} is no longer active before saving; not saving");
         }
         self.save_active(version)?;
-        // The flash commit takes a while; switching slots too early discards the save.
-        std::thread::sleep(SAVE_SETTLE);
-        self.wait_responsive(UNRESPONSIVE_MAX)?;
+        self.wait_save_committed()?;
         // Reload from flash and verify both blobs. Reading a slot right after switching away from it can
         // return the newly active slot's data, so the slot is switched to explicitly before reading.
         self.apply_config(away)?;
@@ -614,6 +615,36 @@ impl Controller {
             }
         }
         Ok(())
+    }
+
+    /// Waits until the controller has been silent after a save (flash write) and answers again.
+    fn wait_save_committed(&self) -> Result<()> {
+        let start = Instant::now();
+        let mut silent_since: Option<Instant> = None;
+        let mut silence_seen = false;
+        let mut heartbeat = true;
+        while start.elapsed() < SAVE_SETTLE {
+            let answered = self.answers_once(heartbeat);
+            heartbeat = !heartbeat;
+            if answered {
+                if silence_seen {
+                    break;
+                }
+                silent_since = None;
+            } else if silent_since.get_or_insert_with(Instant::now).elapsed() >= SAVE_SILENCE_MIN {
+                silence_seen = true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        std::thread::sleep(SAVE_MARGIN);
+        self.wait_responsive(UNRESPONSIVE_MAX)
+    }
+
+    /// Sends one heartbeat or active-slot request and reports whether it was answered within 100 ms.
+    fn answers_once(&self, heartbeat: bool) -> bool {
+        let (req, id) = if heartbeat { (cmd(0x10, &[self.nonce()]), 0x10) } else { (cmd(0x20, &[]), 0x20) };
+        let ok = |p: &Packet| if id == 0x20 { is_config_id_reply(p) } else { is_reply(p) && p[15] == 0x10 };
+        self.send(&req).is_ok() && matches!(self.t.read_until(Duration::from_millis(100), ok), Ok(Some(_)))
     }
 
     /// "Permanent save" (0x50 03) of the active slot's working copy with a new data version.
