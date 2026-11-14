@@ -41,8 +41,14 @@ const KEY_ALIASES: &[(u8, &str)] = &[
     (10, "l1"), (11, "r1"), (12, "l2"), (13, "r2"), (14, "l3"), (15, "r3"), (24, "menu"),
 ];
 
-/// Buttons of the Xbox 360 report that a button can be mapped to.
-const MAP_TARGETS: std::ops::RangeInclusive<u8> = 0..=15;
+/// Buttons of the Xbox 360 report that a button can be mapped to (0-15 plus home = guide, tested).
+fn is_map_target(id: u8) -> bool {
+    id <= 15 || id == 27
+}
+
+/// Mapping to an extra button (c, z, m1-m6) disables the button (tested with m1); the app does the same.
+const EXTRA_BUTTONS: std::ops::RangeInclusive<u8> = 16..=23;
+const TARGET_NONE: u8 = 18;
 
 pub fn key_name(id: u8) -> String {
     KEY_NAMES.iter().find(|(i, _)| *i == id).map(|(_, n)| n.to_string()).unwrap_or(format!("key{id}"))
@@ -162,6 +168,7 @@ fn target_name(id: u8) -> String {
     match id {
         TARGET_MACRO => "macro".into(),
         TARGET_KEYBOARD => "keyboard".into(),
+        k if EXTRA_BUTTONS.contains(&k) => "none".into(),
         k => key_name(k),
     }
 }
@@ -479,13 +486,16 @@ impl Config {
                 d[o] = match target.map(String::as_str) {
                     None => TARGET_DEFAULT,
                     Some("macro") => TARGET_MACRO,
+                    // Extra buttons send nothing by themselves.
+                    Some("none") if EXTRA_BUTTONS.contains(&(i as u8)) => TARGET_DEFAULT,
+                    Some("none") => TARGET_NONE,
                     Some("keyboard") => bail!("keyboard mapping is not supported"),
                     Some(k) => match key_id(k)? {
                         id if id as usize == i => TARGET_DEFAULT,
-                        id if MAP_TARGETS.contains(&id) => id,
+                        id if is_map_target(id) => id,
                         _ => bail!(
                             "[buttons] {name} = {k:?}: can only map to an Xbox 360 button \
-                             (up right down left a b x y select start lb rb lt rt ls rs) or \"macro\""
+                             (up right down left a b x y select start lb rb lt rt ls rs home), \"none\" or \"macro\""
                         ),
                     },
                 };
@@ -671,7 +681,14 @@ mod tests {
         let c = Config::decode(&d).unwrap();
         assert_eq!(c.buttons.get("lb").unwrap(), "rt");
         assert_eq!(c.buttons.get("fn").unwrap(), "a");
-        for bad in ["a = \"m3\"", "a = \"home\"", "a = \"key40\"", "a = \"left_stick\"", "l1 = \"a\"\nlb = \"b\"", "foo = \"a\""] {
+        let d = import_buttons(b, "m1 = \"home\"\na = \"none\"\nm2 = \"none\"").unwrap();
+        assert_eq!(d[KEYS.0 + 3 * 18], 27);
+        assert_eq!(d[KEYS.0 + 3 * 4], TARGET_NONE);
+        assert_eq!(d[KEYS.0 + 3 * 19], TARGET_DEFAULT);
+        let c = Config::decode(&d).unwrap();
+        assert_eq!(c.buttons.get("a").unwrap(), "none");
+        assert_eq!(c.buttons.get("m1").unwrap(), "home");
+        for bad in ["a = \"m3\"", "a = \"fn\"", "a = \"key40\"", "a = \"left_stick\"", "l1 = \"a\"\nlb = \"b\"", "foo = \"a\""] {
             assert!(import_buttons(b, bad).is_err(), "{bad} was accepted");
         }
     }

@@ -85,7 +85,8 @@ mode = "hold"      # "hold" (while pressed), "toggle" (on/off by click) or "off"
 - Vader 4 Pro buttons: `up right down left a b x y select start lb rb lt rt ls rs c z m1 m2 m3 m4 fn home`
   (`fn` = FN button, `home` = power button). The table also has `m5 m6 turbo back key26 key29`-`key31`
   for other models. Names are case-insensitive; `l1`/`r1`, `l2`/`r2`, `l3`/`r3` and `menu` (= `fn`) are aliases.
-- Targets: `up right down left a b x y select start lb rb lt rt ls rs` (or their aliases), or `macro`
+- Targets: `up right down left a b x y select start lb rb lt rt ls rs` (or their aliases), `home` (Xbox
+  guide button; not offered by the official app, but works), `none` (button sends nothing), or `macro`
   (the button runs its macro, see `[macros]`; untested). Anything else is rejected.
 - Entries you don't change keep their exact bytes.
 
