@@ -19,6 +19,7 @@ pub struct Transport {
     pub product: String,
     pub trace: bool,
     last_sent: RefCell<Vec<u8>>,
+    start: Instant,
 }
 
 /// Opens the first 045e:028e device whose manufacturer is "Flydigi" or whose product contains "Flydigi".
@@ -48,7 +49,7 @@ impl Transport {
         let Some((handle, product)) = find()? else {
             bail!("no Flydigi device (045e:028e) found");
         };
-        let t = Transport { handle: RefCell::new(handle), product, trace: false, last_sent: Default::default() };
+        let t = Transport { handle: RefCell::new(handle), product, trace: false, last_sent: Default::default(), start: Instant::now() };
         t.drain();
         Ok(t)
     }
@@ -69,7 +70,7 @@ impl Transport {
                 *self.handle.borrow_mut() = handle;
                 self.last_sent.borrow_mut().clear();
                 if self.trace {
-                    eprintln!("-- reconnected");
+                    eprintln!("{:6} -- reconnected", self.start.elapsed().as_millis());
                 }
                 self.drain();
                 return Ok(());
@@ -83,7 +84,7 @@ impl Transport {
 
     pub fn write(&self, data: &[u8]) -> Result<()> {
         if self.trace {
-            eprintln!(">> {}", hex(data));
+            eprintln!("{:6} >> {}", self.start.elapsed().as_millis(), hex(data));
         }
         self.handle.borrow().write_interrupt(EP_OUT, data, Duration::from_millis(500))?;
         *self.last_sent.borrow_mut() = data.to_vec();
@@ -121,7 +122,7 @@ impl Transport {
             }
             if let Some(p) = self.read(deadline - now)? {
                 if self.trace && is_reply(&p) {
-                    eprintln!("<< {}", hex(&p));
+                    eprintln!("{:6} << {}", self.start.elapsed().as_millis(), hex(&p));
                 }
                 if pred(&p) {
                     return Ok(Some(p));

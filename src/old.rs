@@ -19,6 +19,9 @@ use crate::transport::{Packet, Transport, is_reply};
 const PREFIX: u8 = 0xa5;
 const TIMEOUT: Duration = Duration::from_millis(500);
 const RETRIES: usize = 3;
+// How long the controller may ignore commands (after switches and saves) before an operation fails.
+// Over the dongle, 20 s was sometimes not enough.
+const UNRESPONSIVE_MAX: Duration = Duration::from_secs(60);
 // 3 s was enough for mapping saves; LED saves corrupted the mapping with 3 s but worked with 8 s
 // (together with touching the mapping working copy, see write_blob_inner).
 const SAVE_SETTLE: Duration = Duration::from_secs(8);
@@ -56,6 +59,12 @@ impl Blob {
             Blob::Led => 0x26,
         }
     }
+    fn other(self) -> Blob {
+        match self {
+            Blob::Mapping => Blob::Led,
+            Blob::Led => Blob::Mapping,
+        }
+    }
     fn read_reply(self) -> u8 {
         self.read_cmd() + 1
     }
@@ -83,6 +92,31 @@ impl Blob {
         }
     }
 }
+
+/// The controller answered a read with the other blob's data (it sometimes keeps doing that for minutes).
+#[derive(Debug)]
+struct WrongReply;
+
+impl std::fmt::Display for WrongReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("the controller answered with the wrong config type")
+    }
+}
+
+impl std::error::Error for WrongReply {}
+
+/// The controller ignored a write start command. Pushing such a write through (resending the start
+/// and saving) often saved a stale LED config, so the write is restarted with a fresh slot load.
+#[derive(Debug)]
+struct StartIgnored;
+
+impl std::fmt::Display for StartIgnored {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("the controller ignored the write start command")
+    }
+}
+
+impl std::error::Error for StartIgnored {}
 
 fn cmd(id: u8, args: &[u8]) -> [u8; 15] {
     let mut p = [0u8; 15];
@@ -149,15 +183,18 @@ impl Controller {
     }
 
     pub fn request_timeout(&self, req: &[u8], timeout: Duration, ack: impl Fn(&Packet) -> bool) -> Result<Packet> {
-        for _ in 0..RETRIES {
+        let start = Instant::now();
+        while start.elapsed() < UNRESPONSIVE_MAX {
             let r = self.send(req).and_then(|()| self.t.read_until(timeout, |p| is_reply(p) && ack(p)));
             match r {
                 Ok(Some(p)) => return Ok(p),
-                Ok(None) => {}
+                Ok(None) => {
+                    self.reconnect_if_gone()?;
+                }
                 Err(e) => self.recover_usb_error(e)?,
             }
         }
-        bail!("no reply to command 0x{:02x} after {RETRIES} tries", req[1])
+        bail!("no reply to command 0x{:02x} within {UNRESPONSIVE_MAX:?}", req[1])
     }
 
     /// Reopens the device if it has re-enumerated. Some seconds after a save the controller sometimes
@@ -234,16 +271,13 @@ impl Controller {
         // happened, so success is judged by polling the active slot.
         let switch = cmd(0x50, &[5, slot]);
         let start = Instant::now();
-        let mut resent = 0u64;
-        let mut need_switch = true;
-        while start.elapsed() < Duration::from_secs(20) {
+        let mut last_switch: Option<Instant> = None;
+        while start.elapsed() < UNRESPONSIVE_MAX {
             let r = (|| {
-                if need_switch || (resent < 3 && start.elapsed() > Duration::from_millis(1500 * (resent + 1))) {
+                // The switch command itself can be ignored while the controller is unresponsive.
+                if last_switch.is_none_or(|t| t.elapsed() > Duration::from_millis(1500)) {
                     self.send(&switch)?;
-                    if !need_switch {
-                        resent += 1;
-                    }
-                    need_switch = false;
+                    last_switch = Some(Instant::now());
                 }
                 self.send(&cmd(0x20, &[]))?;
                 self.t.read_until(Duration::from_millis(200), |p| is_reply(p) && p[15] == 0x20)
@@ -253,16 +287,18 @@ impl Controller {
                 Ok(_) => {}
                 Err(e) => {
                     self.recover_usb_error(e)?;
-                    need_switch = true;
+                    last_switch = None;
                 }
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        bail!("slot {slot} did not become active within 20 s")
+        bail!("slot {slot} did not become active within {UNRESPONSIVE_MAX:?}")
     }
 
     /// Reads a blob without restoring the active slot (reading makes `slot` active).
     pub fn read_blob_raw(&self, blob: Blob, slot: u8) -> Result<Vec<u8>> {
+        let wrong = blob.other().read_reply();
+        let mut wrong_seen = false;
         'retry: for _ in 0..RETRIES {
             if let Err(e) = self.send(&cmd(blob.read_cmd(), &[slot])) {
                 self.recover_usb_error(e)?;
@@ -272,7 +308,11 @@ impl Controller {
             let mut data: Vec<u8> = Vec::new();
             let mut received: Vec<bool> = Vec::new();
             loop {
-                let p = match self.t.read_until(TIMEOUT, |p| is_reply(p) && p[15] == blob.read_reply()) {
+                let p = match self.t.read_until(TIMEOUT, |p| is_reply(p) && [blob.read_reply(), wrong].contains(&p[15])) {
+                    Ok(Some(p)) if p[15] == wrong => {
+                        wrong_seen = true;
+                        continue;
+                    }
                     Ok(Some(p)) => p,
                     Ok(None) => continue 'retry,
                     Err(e) => {
@@ -306,19 +346,35 @@ impl Controller {
                 }
             }
         }
+        if wrong_seen {
+            return Err(WrongReply.into());
+        }
         bail!("could not read {blob:?} config of slot {slot}")
     }
 
     /// After slot switches and saves the controller sometimes ignores (read) commands for many seconds.
     fn read_blob_retrying(&self, blob: Blob, slot: u8) -> Result<Vec<u8>> {
         let start = Instant::now();
+        let mut stuck = 0;
         loop {
             match self.read_blob_raw(blob, slot) {
                 Ok(d) => return Ok(d),
-                Err(e) if start.elapsed() > Duration::from_secs(20) => return Err(e),
+                Err(e) if start.elapsed() > UNRESPONSIVE_MAX => return Err(e),
+                Err(e) if e.is::<WrongReply>() => {
+                    stuck += 1;
+                    if stuck % 2 == 1 {
+                        eprintln!("{blob:?} read of slot {slot} got {:?} data; reading that first", blob.other());
+                        let _ = self.read_blob_raw(blob.other(), slot);
+                    } else {
+                        eprintln!("{blob:?} read of slot {slot} got {:?} data; switching slots", blob.other());
+                        self.apply_config(if slot == 0 { 1 } else { 0 })?;
+                        self.apply_config(slot)?;
+                    }
+                    continue;
+                }
                 Err(_) => {}
             }
-            self.wait_responsive(Duration::from_secs(5))?;
+            self.wait_responsive(UNRESPONSIVE_MAX)?;
             std::thread::sleep(Duration::from_millis(500));
         }
     }
@@ -338,7 +394,14 @@ impl Controller {
     /// `version` is the data version to save with; `None` picks a new random one.
     pub fn write_blob(&self, blob: Blob, slot: u8, data: &[u8], version: Option<u16>) -> Result<Vec<u8>> {
         let (active, switch_slot) = self.current_config_id()?;
-        let result = self.write_blob_inner(blob, slot, data, version, true);
+        let mut result = self.write_blob_inner(blob, slot, data, version, true);
+        for _ in 1..RETRIES {
+            if !result.as_ref().is_err_and(|e| e.is::<StartIgnored>()) {
+                break;
+            }
+            eprintln!("the controller ignored the write; reloading slot {slot} and writing again");
+            result = self.write_blob_inner(blob, slot, data, version, true);
+        }
         // Switching to a Switch-mode slot (4-7) also makes it the Switch-mode slot; switching to the
         // previous one first restores that.
         if let Some(s) = switch_slot.filter(|&s| s != slot && slot > 3) {
@@ -358,10 +421,7 @@ impl Controller {
             self.apply_config(away)?;
         }
         self.apply_config(slot)?;
-        let other_blob = match blob {
-            Blob::Mapping => Blob::Led,
-            Blob::Led => Blob::Mapping,
-        };
+        let other_blob = blob.other();
         let other_before = self.read_blob_retrying(other_blob, slot)?;
         let old = self.read_blob_retrying(blob, slot)?;
         if old.len() != data.len() {
@@ -404,7 +464,7 @@ impl Controller {
         self.save_active(version)?;
         // The flash commit takes a while; switching slots too early discards the save.
         std::thread::sleep(SAVE_SETTLE);
-        self.wait_responsive(Duration::from_secs(10))?;
+        self.wait_responsive(UNRESPONSIVE_MAX)?;
         // Reload from flash and verify both blobs. Reading a slot right after switching away from it can
         // return the newly active slot's data, so the slot is switched to explicitly before reading.
         self.apply_config(away)?;
@@ -446,9 +506,10 @@ impl Controller {
         for _ in 0..RETRIES {
             match self.write_blob_partial(blob, slot, start as u8, packets) {
                 Ok(()) => return Ok(()),
+                Err(e) if e.is::<StartIgnored>() => return Err(e),
                 Err(e) => {
                     last_err = Some(e);
-                    self.wait_responsive(Duration::from_secs(5))?;
+                    self.wait_responsive(UNRESPONSIVE_MAX)?;
                 }
             }
         }
@@ -472,7 +533,10 @@ impl Controller {
     pub fn write_blob_partial(&self, blob: Blob, slot: u8, start: u8, packets: &[&[u8]]) -> Result<()> {
         let s = blob.partial_cmd();
         self.separator(0x10)?;
-        self.request(&cmd(s, &[start, packets.len() as u8, 0xa0, slot]), |p| p[15] == s)?;
+        self.send(&cmd(s, &[start, packets.len() as u8, 0xa0, slot]))?;
+        if self.t.read_until(Duration::from_secs(1), |p| is_reply(p) && p[15] == s)?.is_none() {
+            return Err(StartIgnored.into());
+        }
         for (i, chunk) in packets.iter().enumerate() {
             let mut args = [0u8; 12];
             args[..10].copy_from_slice(chunk);

@@ -146,6 +146,9 @@ event = 0
   into the active slot, so the slot is loaded with a real switch before writing.
 - After switches and saves the controller sometimes ignores commands for several seconds, and some
   seconds after a save it occasionally drops its radio link, making the dongle re-enumerate on USB.
-  flugdiggi retries and reopens the device in that case.
+  flugdiggi waits up to 60 s for it and reopens the device after a re-enumeration.
+- Sometimes the controller answers LED reads with mapping data; a full mapping read (or a slot switch)
+  clears that. If it ignores the start of a write, the slot is reloaded and the write restarted, since
+  pushing such a write through often saved an outdated LED config.
 
 Protocol notes and logs live in the separate `workdir` repository.
