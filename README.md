@@ -42,6 +42,32 @@ Typical edit: `flugdiggi export 1 cfg.toml`, edit, `flugdiggi import 1 cfg.toml`
 - `info` reports the battery as a level 0-5 (6 = charging).
 - The LED shown is the active slot's LED config.
 
+## LED config (`led-export` / `led-import`)
+
+The Vader 4 Pro has 5 LEDs in a V shape. Each has 10 animation steps (`[leds]`, colours `#rrggbb`).
+
+- `loop_end`: the animation runs over steps `0..=loop_end` and fades smoothly between steps (and from the
+  last step back to step 0). `loop_end = 0` gives a static colour from step 0.
+- `step_time`: duration of one step, about 100 ms per unit (`15` = 1.5 s per step).
+- `feedback = 1`: the LEDs react to buttons instead of looping. Every button press (incl. stick clicks)
+  plays steps `0..=loop_end` once and the last step stays; e.g. colour at step 0 and black at step 1 gives a
+  flash that fades out.
+- `brightness`: 1-100, has only a weak visible effect.
+- `app_preset`, `loop_start`, `led_count`, `unused_leds` are ignored by the firmware and only kept as-is.
+  `app_preset` is what the official app shows as selected (1 flowing, 2 breathing, 3 gradient,
+  4 feedback, 5 steady, 6 off).
+
+Static purple:
+
+```toml
+loop_end = 0
+feedback = 0
+
+[leds]
+bottom = ["#8000ff", "#000000", "#000000", "#000000", "#000000", "#000000", "#000000", "#000000", "#000000", "#000000"]
+# same for middle_right, top_right, top_left, middle_left
+```
+
 ## Controller quirks this works around
 
 - The controller never sends a reply identical to its previous reply, so repeated commands need a
