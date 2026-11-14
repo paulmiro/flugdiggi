@@ -19,6 +19,7 @@ use crate::transport::{Packet, Transport, is_reply};
 const PREFIX: u8 = 0xa5;
 const TIMEOUT: Duration = Duration::from_millis(500);
 const RETRIES: usize = 3;
+const MAX_SLOT: u8 = 7;
 // How long the controller may ignore commands (after switches and saves) before an operation fails.
 // Over the dongle, 20 s was sometimes not enough.
 const UNRESPONSIVE_MAX: Duration = Duration::from_secs(60);
@@ -117,6 +118,13 @@ impl std::fmt::Display for StartIgnored {
 }
 
 impl std::error::Error for StartIgnored {}
+
+/// A plausible active-slot (0x20) reply. Replies are sometimes torn: bytes 15-17 still hold the previous
+/// reply while the rest is the new one, or vice versa. A torn reply once reported the device type (105)
+/// as the active slot, and switching to it put the controller on a nonexistent config.
+fn is_config_id_reply(p: &Packet) -> bool {
+    is_reply(p) && p[15] == 0x20 && p[16] <= MAX_SLOT && (p[17] != 0xa0 || (4..=MAX_SLOT).contains(&p[18]))
+}
 
 fn cmd(id: u8, args: &[u8]) -> [u8; 15] {
     let mut p = [0u8; 15];
@@ -251,7 +259,7 @@ impl Controller {
 
     /// Returns (active slot, active Switch-mode slot if reported).
     pub fn current_config_id(&self) -> Result<(u8, Option<u8>)> {
-        let d = self.request(&cmd(0x20, &[]), |p| p[15] == 0x20)?;
+        let d = self.request(&cmd(0x20, &[]), is_config_id_reply)?;
         Ok((d[16], (d[17] == 0xa0).then_some(d[18])))
     }
 
@@ -263,6 +271,9 @@ impl Controller {
 
     /// Makes `slot` the active config.
     pub fn apply_config(&self, slot: u8) -> Result<()> {
+        if slot > MAX_SLOT {
+            bail!("refusing to switch to nonexistent slot {slot}");
+        }
         // The controller does not answer a switch to the slot that is already active.
         if self.current_config_id()?.0 == slot {
             return Ok(());
@@ -280,7 +291,7 @@ impl Controller {
                     last_switch = Some(Instant::now());
                 }
                 self.send(&cmd(0x20, &[]))?;
-                self.t.read_until(Duration::from_millis(200), |p| is_reply(p) && p[15] == 0x20)
+                self.t.read_until(Duration::from_millis(200), is_config_id_reply)
             })();
             match r {
                 Ok(Some(d)) if d[16] == slot => return Ok(()),
