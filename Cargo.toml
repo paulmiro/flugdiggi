@@ -1,10 +1,61 @@
-[package]
-name = "flugdiggi"
+[workspace]
+resolver = "3"
+members = ["core", "cli"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "Unlicense"
 
-[dependencies]
-anyhow = "1.0.104"
+[workspace.dependencies]
+flugdiggi-core = { version = "0.1.0", path = "core" }
+
+anstream = "1.0.0"
+anstyle = "1.0.14"
+clap = "4.6.7"
+color-eyre = "0.6.5"
 rusb = "0.9.4"
-serde = { version = "1.0.229", features = ["derive"] }
+serde = "1.0.229"
+thiserror = "2.0.21"
 toml = "1.2.1"
+tracing = "0.1.44"
+tracing-error = "0.2.1"
+tracing-subscriber = "0.3.23"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# No panics.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unreachable = "deny"
+todo = "deny"
+unimplemented = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "deny"
+string_slice = "deny"
+get_unwrap = "deny"
+unwrap_in_result = "deny"
+panic_in_result_fn = "deny"
+missing_panics_doc = "deny"
+exit = "deny"
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_sign_loss = "deny"
+as_conversions = "deny"
+# Output goes through tracing or explicit stdout writes.
+print_stderr = "deny"
+dbg_macro = "deny"
+# Pedantic lints that only add noise here.
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+must_use_candidate = "allow"
+many_single_char_names = "allow"
+
+[profile.release]
+debug = "line-tables-only"

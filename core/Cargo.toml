@@ -1,0 +1,18 @@
+[package]
+name = "flugdiggi-core"
+description = "Talks to Flydigi Vader 4 controllers (old XInput protocol) over USB"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rusb.workspace = true
+serde = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+toml.workspace = true

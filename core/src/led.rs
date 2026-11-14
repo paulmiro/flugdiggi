@@ -1,13 +1,18 @@
 //! LED config blob (version 2.0, 500 bytes) of old-protocol controllers (`RgbConfigParserV20`).
 //!
-//! Layout: version (2), type, loop_start, loop_end, loop_time, light_scale, rgb_num, led_mode, 11 reserved,
+//! Layout: version (2), type, `loop_start`, `loop_end`, `loop_time`, `light_scale`, `rgb_num`, `led_mode`, 11 reserved,
 //! then 16 LEDs x 10 animation steps x RGB. Semantics were tested on a Vader 4 Pro, see workdir/logs.
 
-use anyhow::{Result, bail};
+use std::ops::Range;
+
 use serde::{Deserialize, Serialize};
 
+use crate::bytes::{arr, put, sub, sub_mut, u16_le};
+use crate::error::{Error, Result};
+use crate::types::Blob;
+
 pub const LED_LEN: usize = 500;
-const HEADER: usize = 20;
+const COLORS: Range<usize> = 20..20 + LEDS * STEPS * 3;
 const LEDS: usize = 16;
 const STEPS: usize = 10;
 /// The Vader 4 Pro has 5 LEDs in a V shape; these are LEDs 0-4 in blob order.
@@ -19,7 +24,7 @@ pub struct Led {
     pub version: u16,
     /// 0: the animation loops. 1: every button press plays it once from step 0 and it stays on the last step.
     pub feedback: u8,
-    /// Last animation step (0-9). The animation runs over steps 0..=loop_end, fading between steps.
+    /// Last animation step (0-9). The animation runs over steps `0..=loop_end`, fading between steps.
     pub loop_end: u8,
     /// Duration of one step, about 100 ms per unit (1-100 in the official app).
     pub step_time: u8,
@@ -53,47 +58,49 @@ impl Leds {
     }
 }
 
-fn color(rgb: &[u8]) -> String {
-    format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2])
+fn color([r, g, b]: [u8; 3]) -> String {
+    format!("#{r:02x}{g:02x}{b:02x}")
 }
 
 fn parse_color(s: &str) -> Result<[u8; 3]> {
     let h = s.strip_prefix('#').unwrap_or(s);
-    if h.len() != 6 {
-        bail!("colour {s:?} must be #rrggbb");
+    match u32::from_str_radix(h, 16) {
+        Ok(v) if h.len() == 6 => {
+            let [_, r, g, b] = v.to_be_bytes();
+            Ok([r, g, b])
+        }
+        _ => Err(Error::InvalidConfig(format!("colour {s:?} must be #rrggbb"))),
     }
-    let v = u32::from_str_radix(h, 16)?;
-    Ok([(v >> 16) as u8, (v >> 8) as u8, v as u8])
 }
 
 impl Led {
     pub fn decode(d: &[u8]) -> Result<Led> {
-        if d.len() != LED_LEN || d[1] != 2 || d[0] != 0 {
-            bail!("unsupported LED blob (length {}, version {:02x}{:02x})", d.len(), d.get(1).unwrap_or(&0), d.first().unwrap_or(&0));
+        let [lo, hi]: [u8; 2] = arr(d, 0).unwrap_or_default();
+        if d.len() != LED_LEN || hi != 2 || lo != 0 {
+            return Err(Error::UnsupportedBlob { blob: Blob::Led, len: d.len(), version: [lo, hi] });
         }
-        let steps = |led: usize| -> Vec<String> {
-            (0..STEPS).map(|s| {
-                let o = HEADER + 3 * (led * STEPS + s);
-                color(&d[o..o + 3])
-            }).collect()
+        let colors: Vec<String> = sub(d, COLORS)?.as_chunks::<3>().0.iter().copied().map(color).collect();
+        let mut leds = colors.chunks(STEPS).map(<[String]>::to_vec);
+        let mut next = || leds.next().ok_or(Error::Internal("LED count"));
+        let positions = Leds {
+            bottom: next()?,
+            middle_right: next()?,
+            top_right: next()?,
+            top_left: next()?,
+            middle_left: next()?,
         };
+        let [feedback, loop_start, loop_end, step_time, brightness, led_count, app_preset] = arr(d, 2)?;
         Ok(Led {
-            version: u16::from_le_bytes([d[0], d[1]]),
-            feedback: d[2],
-            loop_start: d[3],
-            loop_end: d[4],
-            step_time: d[5],
-            brightness: d[6],
-            led_count: d[7],
-            app_preset: d[8],
-            unused_leds: (POSITIONS..LEDS).map(steps).collect(),
-            leds: Leds {
-                bottom: steps(0),
-                middle_right: steps(1),
-                top_right: steps(2),
-                top_left: steps(3),
-                middle_left: steps(4),
-            },
+            version: u16_le(d, 0)?,
+            feedback,
+            loop_start,
+            loop_end,
+            step_time,
+            brightness,
+            led_count,
+            app_preset,
+            unused_leds: leds.collect(),
+            leds: positions,
         })
     }
 
@@ -101,30 +108,32 @@ impl Led {
     pub fn apply(&self, orig: &[u8]) -> Result<Vec<u8>> {
         let cur = Led::decode(orig)?;
         if self.version != cur.version {
-            bail!("version is read-only");
+            return Err(Error::InvalidConfig("version is read-only".into()));
         }
         if self.unused_leds.len() != LEDS - POSITIONS {
-            bail!("unused_leds must have {} entries", LEDS - POSITIONS);
+            return Err(Error::InvalidConfig(format!("unused_leds must have {} entries", LEDS - POSITIONS)));
         }
         let all: Vec<&Vec<String>> = self.leds.as_array().into_iter().chain(self.unused_leds.iter()).collect();
         if all.iter().any(|s| s.len() != STEPS) {
-            bail!("every LED must have {STEPS} steps");
+            return Err(Error::InvalidConfig(format!("every LED must have {STEPS} steps")));
         }
         let mut d = orig.to_vec();
-        d[2..9].copy_from_slice(&[
-            self.feedback,
-            self.loop_start,
-            self.loop_end,
-            self.step_time,
-            self.brightness,
-            self.led_count,
-            self.app_preset,
-        ]);
-        for (l, steps) in all.iter().enumerate() {
-            for (s, c) in steps.iter().enumerate() {
-                let o = HEADER + 3 * (l * STEPS + s);
-                d[o..o + 3].copy_from_slice(&parse_color(c)?);
-            }
+        put(
+            &mut d,
+            2,
+            &[
+                self.feedback,
+                self.loop_start,
+                self.loop_end,
+                self.step_time,
+                self.brightness,
+                self.led_count,
+                self.app_preset,
+            ],
+        )?;
+        let region = sub_mut(&mut d, COLORS)?;
+        for (dst, c) in region.as_chunks_mut::<3>().0.iter_mut().zip(all.into_iter().flatten()) {
+            *dst = parse_color(c)?;
         }
         Ok(d)
     }

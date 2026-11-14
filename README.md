@@ -7,16 +7,24 @@ The dongle enumerates as an Xbox 360 pad (`045e:028e`, manufacturer "Flydigi"). 
 its vendor interface via libusb; `xpad` is detached while it runs and reattached afterwards. No
 driver, no root (if the device node is accessible), the gamepad is unusable only while a command runs.
 
+## Layout
+
+- `core` (`flugdiggi-core`): library that talks to the controller (device selection, reconnects, reading and
+  verified writing of the per-slot blobs, TOML-friendly `Config`/`Led` types). Errors are typed
+  (`flugdiggi_core::Error`), logging goes through `tracing`. Meant to be shared by other front ends.
+- `cli` (`flugdiggi-cli`): the `flugdiggi` command line tool (clap, color-eyre).
+
 ## Build
 
 ```sh
-nix-shell --run 'cargo build --release'
+nix-shell --run 'cargo build --release'   # binary: target/release/flugdiggi
+nix-shell --run 'cargo clippy --all-targets && cargo test'
 ```
 
 ## Usage
 
 ```
-flugdiggi [-v] [--device <port|MAC>] <command>
+flugdiggi [-v | -q] [-d <PORT|MAC>] <command>
 
   list [--mac]                list connected Flydigi controllers by USB port and connection
                               ("cable?"/"dongle?" = guess); --mac also shows their MACs and the
@@ -35,6 +43,10 @@ flugdiggi [-v] [--device <port|MAC>] <command>
   led-restore <slot> <file>   write a raw LED blob back to a slot
   raw <cmd[:arg...]>...       send read-only commands and print all replies
 ```
+
+`flugdiggi help <command>` has details. Data (TOML, `list`, `info`) goes to stdout, messages to stderr:
+confirmations by default, only warnings and errors with `-q`, protocol details and every packet with `-v`.
+`RUST_LOG` adds `tracing` filter directives (e.g. `RUST_LOG=flugdiggi_core=debug`).
 
 Typical edit: `flugdiggi export 1 cfg.toml`, edit, `flugdiggi import 1 cfg.toml`.
 
