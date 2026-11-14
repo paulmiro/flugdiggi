@@ -25,23 +25,31 @@ const STICKS_EXTRA: usize = 790;
 const MACRO_INTERVALS: usize = 820;
 const MOTION_SMOOTHNESS: usize = 830;
 
-/// Physical/target key ids (`ControllerKey` in the SDK).
+/// Physical/target key ids (`ControllerKey` in the SDK). On the Vader 4, `fn` is the FN button and
+/// `home` the power button (Xbox logo / Switch home).
 const KEY_NAMES: &[(u8, &str)] = &[
     (0, "up"), (1, "right"), (2, "down"), (3, "left"), (4, "a"), (5, "b"), (6, "select"), (7, "x"),
     (8, "y"), (9, "start"), (10, "lb"), (11, "rb"), (12, "lt"), (13, "rt"), (14, "ls"), (15, "rs"),
     (16, "c"), (17, "z"), (18, "m1"), (19, "m2"), (20, "m3"), (21, "m4"), (22, "m5"), (23, "m6"),
-    (24, "menu"), (25, "turbo"), (27, "home"), (28, "back"), (160, "stick_center"), (161, "stick_up"),
+    (24, "fn"), (25, "turbo"), (27, "home"), (28, "back"), (160, "stick_center"), (161, "stick_up"),
     (162, "stick_up_right"), (163, "stick_right"), (164, "stick_down_right"), (165, "stick_down"),
     (166, "stick_down_left"), (167, "stick_left"), (168, "stick_up_left"), (240, "left_stick"),
     (241, "right_stick"), (242, "wheel"),
 ];
+
+const KEY_ALIASES: &[(u8, &str)] = &[
+    (10, "l1"), (11, "r1"), (12, "l2"), (13, "r2"), (14, "l3"), (15, "r3"), (24, "menu"),
+];
+
+/// Buttons of the Xbox 360 report that a button can be mapped to.
+const MAP_TARGETS: std::ops::RangeInclusive<u8> = 0..=15;
 
 pub fn key_name(id: u8) -> String {
     KEY_NAMES.iter().find(|(i, _)| *i == id).map(|(_, n)| n.to_string()).unwrap_or(format!("key{id}"))
 }
 
 pub fn key_id(name: &str) -> Result<u8> {
-    if let Some((i, _)) = KEY_NAMES.iter().find(|(_, n)| n.eq_ignore_ascii_case(name)) {
+    if let Some((i, _)) = KEY_NAMES.iter().chain(KEY_ALIASES).find(|(_, n)| n.eq_ignore_ascii_case(name)) {
         return Ok(*i);
     }
     if let Some(n) = name.strip_prefix("key").and_then(|n| n.parse().ok()) {
@@ -112,7 +120,14 @@ impl<T: Serialize> Serialize for Named<T> {
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for Named<T> {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let m = std::collections::BTreeMap::<String, T>::deserialize(d)?;
-        let mut v: Vec<(String, T)> = m.into_iter().collect();
+        let mut v: Vec<(String, T)> = Vec::new();
+        for (name, val) in m {
+            let canon = key_id(&name).map(key_name).unwrap_or(name.clone());
+            if let Some((other, _)) = v.iter().find(|(n, _)| key_id(n).map(key_name).ok().as_ref() == Some(&canon)) {
+                return Err(serde::de::Error::custom(format!("{name:?} and {other:?} are the same button")));
+            }
+            v.push((canon, val));
+        }
         v.sort_by_key(|(n, _)| key_id(n).unwrap_or(u8::MAX));
         Ok(Named(v))
     }
@@ -467,7 +482,11 @@ impl Config {
                     Some("keyboard") => bail!("keyboard mapping is not supported"),
                     Some(k) => match key_id(k)? {
                         id if id as usize == i => TARGET_DEFAULT,
-                        id => id,
+                        id if MAP_TARGETS.contains(&id) => id,
+                        _ => bail!(
+                            "[buttons] {name} = {k:?}: can only map to an Xbox 360 button \
+                             (up right down left a b x y select start lb rb lt rt ls rs) or \"macro\""
+                        ),
                     },
                 };
             }
@@ -633,6 +652,28 @@ mod tests {
         assert_eq!(d[KEYS.0 + 3 * 16], TARGET_DEFAULT);
         let diff: Vec<usize> = (0..d.len()).filter(|&i| d[i] != b[i]).collect();
         assert_eq!(diff, vec![KEYS.0 + 3 * 16, KEYS.0 + 3 * 18]);
+    }
+
+    fn import_buttons(b: &[u8], buttons: &str) -> Result<Vec<u8>> {
+        let mut t: toml::Table = toml::from_str(&toml::to_string(&Config::decode(b)?)?)?;
+        t.insert("buttons".into(), toml::Value::Table(toml::from_str(buttons)?));
+        let c: Config = toml::from_str(&toml::to_string(&t)?)?;
+        c.apply(b)
+    }
+
+    #[test]
+    fn aliases_and_target_validation() {
+        let b = &backups()[0];
+        let d = import_buttons(b, "L1 = \"r2\"\nm1 = \"l3\"\nmenu = \"a\"").unwrap();
+        assert_eq!(d[KEYS.0 + 3 * 10], 13);
+        assert_eq!(d[KEYS.0 + 3 * 18], 14);
+        assert_eq!(d[KEYS.0 + 3 * 24], 4);
+        let c = Config::decode(&d).unwrap();
+        assert_eq!(c.buttons.get("lb").unwrap(), "rt");
+        assert_eq!(c.buttons.get("fn").unwrap(), "a");
+        for bad in ["a = \"m3\"", "a = \"home\"", "a = \"key40\"", "a = \"left_stick\"", "l1 = \"a\"\nlb = \"b\"", "foo = \"a\""] {
+            assert!(import_buttons(b, bad).is_err(), "{bad} was accepted");
+        }
     }
 
     #[test]
