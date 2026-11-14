@@ -40,8 +40,7 @@ Typical edit: `flugdiggi export 1 cfg.toml`, edit, `flugdiggi import 1 cfg.toml`
   `flugdiggi-backup-<kind>-slot<N>-<time>.bin` in the current directory, then saves to flash,
   reloads the slot and verifies both its mapping and LED config. A write takes 15-35 s.
 - `info` reports the battery as a level 0-5 (6 = charging).
-- The LED shown is the active slot's LED config. Unverified: after power-on the controller may show the
-  LED config of the active Switch-mode slot instead until the first slot switch.
+- The LED shown is the active slot's LED config.
 
 ## Controller quirks this works around
 
