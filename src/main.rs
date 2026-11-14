@@ -6,8 +6,9 @@ use flugdiggi::led::Led;
 use flugdiggi::old::{Blob, Controller, Version};
 use flugdiggi::transport::{hex, is_reply};
 
-const USAGE: &str = "usage: flugdiggi [-v] <command>
+const USAGE: &str = "usage: flugdiggi [-v] [--device <MAC>] <command>
 
+  list                        list connected Flydigi controllers and their MACs
   info                        device info, active slot, slot versions
   slot [N]                    show or switch the active slot (0-3)
   export <slot> [file.toml]   print or save a slot's config as TOML
@@ -22,6 +23,7 @@ const USAGE: &str = "usage: flugdiggi [-v] <command>
   led-restore <slot> <file>   write a raw LED blob back to a slot
   raw <cmd[:arg...]>...       send read-only commands and print all replies
 
+--device is required when several controllers are connected.
 Slots 4-7 are the Switch-mode configs. Every write first saves the slot's previous
 content to flugdiggi-backup-<kind>-slot<N>-<time>.bin in the current directory.";
 
@@ -80,8 +82,14 @@ fn write_with_backup(
 
 fn main() -> Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let trace = args.first().is_some_and(|a| a == "-v");
-    if trace {
+    let mut trace = false;
+    let mut device = None;
+    loop {
+        match args.first().map(String::as_str) {
+            Some("-v") => trace = true,
+            Some("--device") if args.len() > 1 => device = Some(args.remove(1)),
+            _ => break,
+        }
         args.remove(0);
     }
     let Some(sub) = args.first().cloned() else { usage() };
@@ -98,7 +106,17 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let mut c = Controller::open()?;
+    if sub == "list" {
+        for f in Controller::list()? {
+            match f.info {
+                Some(i) => println!("{}  {}  {}  firmware {}", f.location, i.mac, f.product, i.firmware),
+                None => println!("{}  (no answer)  {}", f.location, f.product),
+            }
+        }
+        return Ok(());
+    }
+
+    let mut c = Controller::open_mac(device.as_deref())?;
     c.t.trace = trace;
 
     match (sub.as_str(), arg(1), arg(2)) {

@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use rusb::{DeviceHandle, GlobalContext};
 
 /// Flydigi dongles (and wired old-protocol controllers) pose as an Xbox 360 controller.
@@ -22,34 +22,50 @@ pub struct Transport {
     start: Instant,
 }
 
-/// Opens the first 045e:028e device whose manufacturer is "Flydigi" or whose product contains "Flydigi".
-fn find() -> Result<Option<(DeviceHandle<GlobalContext>, String)>> {
+/// A 045e:028e device whose manufacturer is "Flydigi" or whose product contains "Flydigi".
+pub struct Candidate {
+    dev: rusb::Device<GlobalContext>,
+    pub product: String,
+}
+
+impl Candidate {
+    pub fn location(&self) -> String {
+        format!("{:03}:{:03}", self.dev.bus_number(), self.dev.address())
+    }
+}
+
+/// Lists Flydigi devices. Devices that can't be opened (e.g. no permission) are skipped.
+pub fn candidates() -> Result<Vec<Candidate>> {
+    let mut out = Vec::new();
     for dev in rusb::devices()?.iter() {
-        let desc = dev.device_descriptor()?;
+        let Ok(desc) = dev.device_descriptor() else { continue };
         if desc.vendor_id() != XUSB_VID || desc.product_id() != XUSB_PID {
             continue;
         }
-        let handle = dev.open().context("opening USB device")?;
+        let Ok(handle) = dev.open() else { continue };
         // A wired Vader 4 Pro stalls the manufacturer string request.
         let manufacturer = handle.read_manufacturer_string_ascii(&desc).unwrap_or_default();
         let product = handle.read_product_string_ascii(&desc).unwrap_or_default();
-        if !manufacturer.eq_ignore_ascii_case("flydigi") && !product.to_ascii_lowercase().contains("flydigi") {
-            continue;
+        if manufacturer.eq_ignore_ascii_case("flydigi") || product.to_ascii_lowercase().contains("flydigi") {
+            out.push(Candidate { dev, product });
         }
-        handle.set_auto_detach_kernel_driver(true)?;
-        handle.claim_interface(IFACE).context("claiming interface 0")?;
-        return Ok(Some((handle, product)));
     }
-    Ok(None)
+    Ok(out)
 }
 
 impl Transport {
     /// The kernel driver (xpad) is detached while the transport is alive and reattached on drop.
-    pub fn open() -> Result<Self> {
-        let Some((handle, product)) = find()? else {
-            bail!("no Flydigi device (045e:028e) found");
+    pub fn open(cand: &Candidate) -> Result<Self> {
+        let handle = cand.dev.open().context("opening USB device")?;
+        handle.set_auto_detach_kernel_driver(true)?;
+        handle.claim_interface(IFACE).context("claiming interface 0 (in use by another program?)")?;
+        let t = Transport {
+            handle: RefCell::new(handle),
+            product: cand.product.clone(),
+            trace: false,
+            last_sent: Default::default(),
+            start: Instant::now(),
         };
-        let t = Transport { handle: RefCell::new(handle), product, trace: false, last_sent: Default::default(), start: Instant::now() };
         t.drain();
         Ok(t)
     }
@@ -61,24 +77,12 @@ impl Transport {
         !list.iter().any(|d| d.bus_number() == dev.bus_number() && d.address() == dev.address())
     }
 
-    /// Waits for the device to come back after a re-enumeration and reopens it.
-    pub fn reconnect(&self, max: Duration) -> Result<()> {
-        let start = Instant::now();
-        loop {
-            if let Ok(Some((handle, _))) = find() {
-                let _ = self.handle.borrow().release_interface(IFACE);
-                *self.handle.borrow_mut() = handle;
-                self.last_sent.borrow_mut().clear();
-                if self.trace {
-                    eprintln!("{:6} -- reconnected", self.start.elapsed().as_millis());
-                }
-                self.drain();
-                return Ok(());
-            }
-            if start.elapsed() > max {
-                bail!("device did not come back within {max:?}");
-            }
-            std::thread::sleep(Duration::from_millis(250));
+    /// Continues on the device of `other` (after a re-enumeration); `other` gets the old handle.
+    pub fn take_over(&self, other: &Transport) {
+        std::mem::swap(&mut *self.handle.borrow_mut(), &mut *other.handle.borrow_mut());
+        std::mem::swap(&mut *self.last_sent.borrow_mut(), &mut *other.last_sent.borrow_mut());
+        if self.trace {
+            eprintln!("{:6} -- reconnected", self.start.elapsed().as_millis());
         }
     }
 

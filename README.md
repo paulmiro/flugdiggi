@@ -16,8 +16,9 @@ nix-shell --run 'cargo build --release'
 ## Usage
 
 ```
-flugdiggi [-v] <command>
+flugdiggi [-v] [--device <MAC>] <command>
 
+  list                        list connected Flydigi controllers and their MACs
   info                        device info, active slot, slot versions
   slot [N]                    show or switch the active slot (0-3)
   export <slot> [file.toml]   print or save a slot's config as TOML
@@ -34,6 +35,9 @@ flugdiggi [-v] <command>
 ```
 
 Typical edit: `flugdiggi export 1 cfg.toml`, edit, `flugdiggi import 1 cfg.toml`.
+
+With several controllers connected, pick one with `--device <MAC>` (see `flugdiggi list`); without it
+flugdiggi refuses to run. After a dongle re-enumeration it only reconnects to the device with that MAC.
 
 - Slots 0-3 are the XInput-mode configs, 4-7 the Switch-mode configs; all are readable and writable.
   Writing a Switch-mode slot briefly makes it the active slot; afterwards both the active slot and the

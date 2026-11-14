@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 
-use crate::transport::{Packet, Transport, is_reply};
+use crate::transport::{Packet, Transport, candidates, is_reply};
 
 const PREFIX: u8 = 0xa5;
 const TIMEOUT: Duration = Duration::from_millis(500);
@@ -27,12 +27,23 @@ const UNRESPONSIVE_MAX: Duration = Duration::from_secs(60);
 // About 1 s after a save the controller is silent for ~1-2 s (the flash write); switching slots after that
 // kept the save in all tests. If no such silence shows up, the wait falls back to SAVE_SETTLE.
 // (Session 1: a fixed 3 s once let an LED save corrupt the mapping, 8 s worked.)
+const PROBE_TRIES: usize = 5;
+const RECONNECT_MAX: Duration = Duration::from_secs(15);
 const SAVE_SETTLE: Duration = Duration::from_secs(8);
 const SAVE_SILENCE_MIN: Duration = Duration::from_millis(500);
 const SAVE_MARGIN: Duration = Duration::from_millis(500);
 
 pub struct Controller {
     pub t: Transport,
+    /// MAC of the selected controller; a reconnect only accepts a device that reports it.
+    mac: Option<String>,
+}
+
+/// A Flydigi USB device and the heartbeat it answered with (None if it didn't answer).
+pub struct Found {
+    pub location: String,
+    pub product: String,
+    pub info: Option<DeviceInfo>,
 }
 
 #[derive(Debug, Clone)]
@@ -168,13 +179,83 @@ fn fw(lo: u8, hi: u8) -> String {
     format!("{}.{}.{}.{}", hi >> 4, hi & 0xf, lo >> 4, lo & 0xf)
 }
 
+fn device_info(d: &Packet) -> DeviceInfo {
+    DeviceInfo {
+        device_type: d[16],
+        mac: format!("{:02X}:{:02X}:{:02X}:{:02X}", d[20], d[19], d[18], d[17]),
+        firmware: fw(d[21], d[22]),
+        battery: if d[23] >> 4 == 1 { 6 } else { d[23] & 0xf },
+        charging: d[23] >> 4 == 1,
+        chip_type: d[24],
+        wired: d[25] == 1,
+        motion_chip: d[26],
+        current_config: d[27],
+    }
+}
+
 impl Controller {
+    /// Opens the only Flydigi controller; fails if there are several.
     pub fn open() -> Result<Self> {
-        let c = Controller { t: Transport::open()? };
+        Self::open_mac(None)
+    }
+
+    /// Opens the controller with this MAC, or the only one if `mac` is None.
+    pub fn open_mac(mac: Option<&str>) -> Result<Self> {
+        let cands = candidates()?;
+        if cands.is_empty() {
+            bail!("no Flydigi device (045e:028e) found");
+        }
+        if mac.is_none() && cands.len() == 1 {
+            let c = Self::init(Transport::open(&cands[0])?)?;
+            let mac = c.probe().map(|i| i.mac);
+            return Ok(Controller { mac, ..c });
+        }
+        let mut seen = Vec::new();
+        for cand in &cands {
+            let Ok(c) = Transport::open(cand).and_then(Self::init) else { continue };
+            let Some(info) = c.probe() else { continue };
+            if mac.is_some_and(|m| m.eq_ignore_ascii_case(&info.mac)) {
+                return Ok(Controller { mac: Some(info.mac), ..c });
+            }
+            seen.push(info.mac);
+        }
+        match mac {
+            Some(m) => bail!("no controller with MAC {m} found (answering: {})", seen.join(", ")),
+            None => bail!("several Flydigi devices found, choose one with --device <MAC> (see `flugdiggi list`)"),
+        }
+    }
+
+    /// Lists all Flydigi devices with their heartbeat. Opening a device briefly detaches its kernel driver.
+    pub fn list() -> Result<Vec<Found>> {
+        Ok(candidates()?
+            .into_iter()
+            .map(|cand| {
+                let info = Transport::open(&cand).and_then(Self::init).ok().and_then(|c| c.probe());
+                Found { location: cand.location(), product: cand.product, info }
+            })
+            .collect())
+    }
+
+    fn init(t: Transport) -> Result<Self> {
+        let c = Controller { t, mac: None };
         // The last reply of a previous session is unknown; after these two it is a known heartbeat.
         c.separator(0x20)?;
         c.separator(0x10)?;
         Ok(c)
+    }
+
+    /// A heartbeat with a short timeout, for telling devices apart without waiting for a sleeping one.
+    fn probe(&self) -> Option<DeviceInfo> {
+        for _ in 0..PROBE_TRIES {
+            let req = cmd(0x10, &[self.nonce()]);
+            if self.send(&req).is_err() {
+                return None;
+            }
+            if let Ok(Some(d)) = self.t.read_until(Duration::from_millis(200), |p| is_reply(p) && p[15] == 0x10) {
+                return Some(device_info(&d));
+            }
+        }
+        None
     }
 
     fn separator(&self, id: u8) -> Result<()> {
@@ -241,10 +322,33 @@ impl Controller {
         if !self.t.is_gone() {
             return Ok(false);
         }
-        self.t.reconnect(Duration::from_secs(15))?;
-        self.separator(0x20)?;
-        self.separator(0x10)?;
-        Ok(true)
+        let start = Instant::now();
+        loop {
+            if let Some(mut c) = self.find_again() {
+                c.t.trace = self.t.trace;
+                self.t.take_over(&c.t);
+                return Ok(true);
+            }
+            if start.elapsed() > RECONNECT_MAX {
+                bail!("device did not come back within {RECONNECT_MAX:?}");
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+
+    /// The re-enumerated device: the one reporting our MAC, or, if the MAC is unknown, the only device.
+    fn find_again(&self) -> Option<Controller> {
+        let cands = candidates().ok()?;
+        if self.mac.is_none() {
+            return match cands.as_slice() {
+                [cand] => Transport::open(cand).and_then(Self::init).ok(),
+                _ => None,
+            };
+        }
+        cands.iter().find_map(|cand| {
+            let c = Transport::open(cand).and_then(Self::init).ok()?;
+            (c.probe()?.mac == *self.mac.as_ref()?).then_some(c)
+        })
     }
 
     /// Called after a USB error: waits briefly for the device to disappear and reopens it.
@@ -274,17 +378,7 @@ impl Controller {
 
     pub fn heartbeat(&self) -> Result<DeviceInfo> {
         let d = self.request(&cmd(0x10, &[self.nonce()]), |p| p[15] == 0x10)?;
-        Ok(DeviceInfo {
-            device_type: d[16],
-            mac: format!("{:02X}:{:02X}:{:02X}:{:02X}", d[20], d[19], d[18], d[17]),
-            firmware: fw(d[21], d[22]),
-            battery: if d[23] >> 4 == 1 { 6 } else { d[23] & 0xf },
-            charging: d[23] >> 4 == 1,
-            chip_type: d[24],
-            wired: d[25] == 1,
-            motion_chip: d[26],
-            current_config: d[27],
-        })
+        Ok(device_info(&d))
     }
 
     /// Returns (active slot, active Switch-mode slot if reported).
