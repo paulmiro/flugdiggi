@@ -87,8 +87,34 @@ mode = "hold"      # "hold" (while pressed), "toggle" (on/off by click) or "off"
   for other models. Names are case-insensitive; `l1`/`r1`, `l2`/`r2`, `l3`/`r3` and `menu` (= `fn`) are aliases.
 - Targets: `up right down left a b x y select start lb rb lt rt ls rs` (or their aliases), `home` (Xbox
   guide button; not offered by the official app, but works), `none` (button sends nothing), or `macro`
-  (the button runs its macro, see `[macros]`; untested). Anything else is rejected.
+  (set automatically for buttons that have a macro). Anything else is rejected.
 - Entries you don't change keep their exact bytes.
+
+## Macros (`export` / `import`)
+
+A macro replaces its button with a timed sequence of button events (up to 5 macros per config):
+
+```toml
+[macros]
+intervals_ms = [30, 30, 30, 30, 30]   # repeat interval per macro
+
+[[macros.list]]
+button = "a"       # pressing A plays this instead of A
+mode = 1           # 1 = once per press, 2 = repeat while held, 3 = toggle repeat by click
+
+[[macros.list.steps]]
+at_ms = 0          # time since the press, steps of 10 ms
+key = "b"
+event = 1          # 1 = press, 0 = release
+
+[[macros.list.steps]]
+at_ms = 100
+key = "b"
+event = 0
+```
+
+The macro's button gets the `"macro"` target in `[buttons]` automatically (the controller does the same).
+Tested on hardware: a press of A sent B, then Y 400 ms later, exactly on time, and no A.
 
 ## Rumble (`export` / `import`)
 

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 pub const CONFIG_LEN: usize = 840;
 
-const KEYS: (usize, usize) = (13, 109);
+pub const KEYS: (usize, usize) = (13, 109);
 const BUTTONS: usize = 32;
 const STICKS: usize = 109;
 const TRIGGERS: usize = 123;
@@ -474,9 +474,26 @@ impl Config {
                 }
             }
         }
+        // The firmware marks a button that has a macro with the "macro" target by itself, so do the same.
+        let mut macro_buttons = Vec::new();
+        for m in &self.macros.list {
+            let id = key_id(&m.button)?;
+            if id as usize >= BUTTONS {
+                bail!("[macros] button {:?} is not a button of the mapping table", m.button);
+            }
+            macro_buttons.push(key_name(id));
+        }
+        let macro_target = "macro".to_string();
         for i in 0..BUTTONS {
             let name = key_name(i as u8);
-            let (target, old_target) = (self.buttons.get(&name), cur.buttons.get(&name));
+            let has_macro = macro_buttons.contains(&name);
+            let target = match self.buttons.get(&name) {
+                None if has_macro => Some(&macro_target),
+                Some(t) if has_macro && t != "macro" => bail!("[buttons] {name} = {t:?}, but {name} has a macro"),
+                Some(t) if !has_macro && t == "macro" => bail!("[buttons] {name} = \"macro\", but there is no macro for {name}"),
+                t => t,
+            };
+            let old_target = cur.buttons.get(&name);
             let (turbo, old_turbo) = (self.turbo.get(&name), cur.turbo.get(&name));
             if target == old_target && turbo == old_turbo {
                 continue;
@@ -691,6 +708,28 @@ mod tests {
         for bad in ["a = \"m3\"", "a = \"fn\"", "a = \"key40\"", "a = \"left_stick\"", "l1 = \"a\"\nlb = \"b\"", "foo = \"a\""] {
             assert!(import_buttons(b, bad).is_err(), "{bad} was accepted");
         }
+    }
+
+    #[test]
+    fn macro_button_gets_macro_target() {
+        let b = &backups()[0];
+        let mut c = Config::decode(b).unwrap();
+        c.macros.list.push(Macro {
+            button: "a".into(),
+            mode: 1,
+            steps: vec![Step { at_ms: 0, key: "b".into(), event: 1 }, Step { at_ms: 100, key: "b".into(), event: 0 }],
+        });
+        let d = c.apply(b).unwrap();
+        assert_eq!(d[KEYS.0 + 3 * 4], TARGET_MACRO);
+        let mut back = Config::decode(&d).unwrap();
+        assert_eq!(back.buttons.get("a").unwrap(), "macro");
+        back.buttons.set("a", "x".into());
+        assert!(back.apply(&d).is_err());
+        back.buttons.set("a", "macro".into());
+        back.macros.list.clear();
+        assert!(back.apply(&d).is_err());
+        back.buttons.0.retain(|(n, _)| n != "a");
+        assert_eq!(back.apply(&d).unwrap()[KEYS.0 + 3 * 4], TARGET_DEFAULT);
     }
 
     #[test]

@@ -341,12 +341,12 @@ impl Controller {
             bail!("writing Switch-mode slots (4-7) is not supported");
         }
         let active = self.current_config_id()?.0;
-        let result = self.write_blob_inner(blob, slot, data, version);
+        let result = self.write_blob_inner(blob, slot, data, version, true);
         self.apply_config(active)?;
         result
     }
 
-    fn write_blob_inner(&self, blob: Blob, slot: u8, data: &[u8], version: Option<u16>) -> Result<Vec<u8>> {
+    fn write_blob_inner(&self, blob: Blob, slot: u8, data: &[u8], version: Option<u16>, retry: bool) -> Result<Vec<u8>> {
         // The save (0x50 03) stores the controller's whole working copy (mapping + LED) into the active
         // slot, and a partial write to a slot does not load that slot into the working copy. So the slot
         // is loaded with a real switch first (switching away first if it is active, which also drops
@@ -407,7 +407,16 @@ impl Controller {
         std::thread::sleep(Duration::from_secs(1));
         self.apply_config(slot)?;
         std::thread::sleep(Duration::from_millis(500));
-        if self.read_blob_retrying(blob, slot)? != new {
+        let back = self.read_blob_retrying(blob, slot)?;
+        if back != new {
+            // Removing a macro and its button's "macro" target in one write leaves the target set (the
+            // firmware re-marks it); a second write of only the button table sticks.
+            let keys = crate::config::KEYS.0..crate::config::KEYS.1;
+            let only_keys = (0..new.len()).filter(|&i| back[i] != new[i]).all(|i| keys.contains(&i));
+            if retry && matches!(blob, Blob::Mapping) && only_keys {
+                eprintln!("button table of slot {slot} differs after writing; writing it again");
+                return self.write_blob_inner(blob, slot, data, Some(version), false);
+            }
             bail!("read-back of slot {slot} differs from what was written");
         }
         let mut other_expected = other_before;
