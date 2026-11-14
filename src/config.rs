@@ -269,7 +269,7 @@ pub struct Motion {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Macros {
-    /// Repeat interval per macro in ms (firmware 3.1+, steps of 10 ms).
+    /// Pause between repetitions per macro in ms (modes 2 and 3; firmware 3.1+, steps of 10 ms).
     pub intervals_ms: Vec<u16>,
     pub list: Vec<Macro>,
 }
@@ -278,7 +278,7 @@ pub struct Macros {
 pub struct Macro {
     /// Button that triggers the macro.
     pub button: String,
-    /// 0 = none, 1 = once, 2 = while pressed, 3 = toggle by click.
+    /// 0 = none, 1 = once per press, 2 = repeat while held, 3 = repeat, toggled by click.
     pub mode: u8,
     pub steps: Vec<Step>,
 }
@@ -288,7 +288,8 @@ pub struct Step {
     /// Time since macro start in ms (steps of 10 ms).
     pub at_ms: u32,
     pub key: String,
-    /// 0 = release, 1 = press, 2 = left stick, 3 = right stick, 5 = hold.
+    /// 0 = release, 1 = press, 2 = left stick, 3 = right stick (key = stick_* direction, held until the
+    /// next stick step), 5 = hold.
     pub event: u8,
 }
 

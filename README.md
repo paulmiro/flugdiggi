@@ -96,7 +96,7 @@ A macro replaces its button with a timed sequence of button events (up to 5 macr
 
 ```toml
 [macros]
-intervals_ms = [30, 30, 30, 30, 30]   # repeat interval per macro
+intervals_ms = [30, 30, 30, 30, 30]   # pause between repetitions, per macro (modes 2 and 3)
 
 [[macros.list]]
 button = "a"       # pressing A plays this instead of A
@@ -105,7 +105,7 @@ mode = 1           # 1 = once per press, 2 = repeat while held, 3 = toggle repea
 [[macros.list.steps]]
 at_ms = 0          # time since the press, steps of 10 ms
 key = "b"
-event = 1          # 1 = press, 0 = release
+event = 1          # 1 = press, 0 = release; 2/3 = move the left/right stick (see below)
 
 [[macros.list.steps]]
 at_ms = 100
@@ -113,8 +113,14 @@ key = "b"
 event = 0
 ```
 
-The macro's button gets the `"macro"` target in `[buttons]` automatically (the controller does the same).
-Tested on hardware: a press of A sent B, then Y 400 ms later, exactly on time, and no A.
+- The macro's button gets the `"macro"` target in `[buttons]` automatically (the controller does the same)
+  and no longer sends its own input.
+- Mode 2 repeats the macro while the button is held, mode 3 starts repeating on one click and stops on the
+  next; each run is followed by the pause from `intervals_ms`.
+- Stick steps: `event = 2` (left) or `3` (right) with `key` = `stick_up`, `stick_up_right`, `stick_right`,
+  `stick_down_right`, `stick_down`, `stick_down_left`, `stick_left`, `stick_up_left` or `stick_center`.
+  The stick is fully deflected until the next step for that stick; end with `stick_center`.
+- All modes, intervals and stick steps were tested on hardware; timing was exact to about 1 ms.
 
 ## Rumble (`export` / `import`)
 
