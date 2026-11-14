@@ -146,7 +146,8 @@ fn main() -> Result<()> {
             let slot = parse_slot(slot)?;
             let new = std::fs::read(file)?;
             Led::decode(&new)?;
-            let version = c.config_versions()?[slot as usize];
+            let m = c.read_config(slot)?;
+            let version = u16::from_le_bytes([m[225], m[226]]);
             write_with_backup(&c, Blob::Led, slot, &new, Some(version))?;
         }
         ("dump", Some(slot), Some(file)) => {

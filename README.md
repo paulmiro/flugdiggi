@@ -35,7 +35,9 @@ flugdiggi [-v] <command>
 
 Typical edit: `flugdiggi export 1 cfg.toml`, edit, `flugdiggi import 1 cfg.toml`.
 
-- Slots 0-3 are the XInput-mode configs (writable), 4-7 the Switch-mode configs (read-only for now).
+- Slots 0-3 are the XInput-mode configs, 4-7 the Switch-mode configs; all are readable and writable.
+  Writing a Switch-mode slot briefly makes it the active slot; afterwards both the active slot and the
+  active Switch-mode slot are restored.
 - Every write first saves the slot's previous content to
   `flugdiggi-backup-<kind>-slot<N>-<time>.bin` in the current directory, then saves to flash,
   reloads the slot and verifies both its mapping and LED config. A write takes 15-35 s.
@@ -136,7 +138,10 @@ event = 0
 
 - The controller never sends a reply identical to its previous reply, so repeated commands need a
   different command in between.
-- Reading or writing a slot makes it the active slot; the previously active slot is restored.
+- Reading a slot 0-3 or writing any slot makes it the active slot; the previously active slot is restored.
+- Switching to a Switch-mode slot (4-7) makes it both the active slot and the active Switch-mode slot
+  (reading one does not). The official app writes these slots with a "write all" transfer instead;
+  flugdiggi uses the same partial write + save as for slots 0-3.
 - Writes change a RAM working copy; `50 03 <version>` saves the whole working copy (mapping and LED)
   into the active slot, so the slot is loaded with a real switch before writing.
 - After switches and saves the controller sometimes ignores commands for several seconds, and some

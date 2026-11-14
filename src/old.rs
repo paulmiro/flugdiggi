@@ -337,11 +337,13 @@ impl Controller {
     /// Returns the blob as stored (a mapping config's data version changes).
     /// `version` is the data version to save with; `None` picks a new random one.
     pub fn write_blob(&self, blob: Blob, slot: u8, data: &[u8], version: Option<u16>) -> Result<Vec<u8>> {
-        if slot > 3 {
-            bail!("writing Switch-mode slots (4-7) is not supported");
-        }
-        let active = self.current_config_id()?.0;
+        let (active, switch_slot) = self.current_config_id()?;
         let result = self.write_blob_inner(blob, slot, data, version, true);
+        // Switching to a Switch-mode slot (4-7) also makes it the Switch-mode slot; switching to the
+        // previous one first restores that.
+        if let Some(s) = switch_slot.filter(|&s| s != slot && slot > 3) {
+            self.apply_config(s)?;
+        }
         self.apply_config(active)?;
         result
     }
@@ -368,7 +370,9 @@ impl Controller {
         if old == data {
             return Ok(old);
         }
-        let current = self.config_versions()?[slot as usize];
+        let mapping = if let Blob::Mapping = blob { &old } else { &other_before };
+        let v = crate::config::DATA_VERSION;
+        let current = u16::from_le_bytes([mapping[v], mapping[v + 1]]);
         let version = version.unwrap_or_else(|| new_version(current));
         let mut new = data.to_vec();
         if let Blob::Mapping = blob {
