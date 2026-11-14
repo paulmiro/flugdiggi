@@ -1,7 +1,7 @@
 # flugdiggi
 
 Minimal Linux client for the Flydigi Vader 4 Pro (old "XInput" protocol of Flydigi Space Station),
-reverse engineered from Space Station 4.2.0.9. Tested with the 2.4 GHz dongle only.
+reverse engineered from Space Station 4.2.0.9. Tested with the 2.4 GHz dongle and over USB cable.
 
 The dongle enumerates as an Xbox 360 pad (`045e:028e`, manufacturer "Flydigi"). flugdiggi talks to
 its vendor interface via libusb; `xpad` is detached while it runs and reattached afterwards. No

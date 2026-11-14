@@ -21,7 +21,7 @@ pub struct Transport {
     last_sent: RefCell<Vec<u8>>,
 }
 
-/// Opens the first 045e:028e device whose manufacturer string is "Flydigi".
+/// Opens the first 045e:028e device whose manufacturer is "Flydigi" or whose product contains "Flydigi".
 fn find() -> Result<Option<(DeviceHandle<GlobalContext>, String)>> {
     for dev in rusb::devices()?.iter() {
         let desc = dev.device_descriptor()?;
@@ -29,11 +29,12 @@ fn find() -> Result<Option<(DeviceHandle<GlobalContext>, String)>> {
             continue;
         }
         let handle = dev.open().context("opening USB device")?;
+        // A wired Vader 4 Pro stalls the manufacturer string request.
         let manufacturer = handle.read_manufacturer_string_ascii(&desc).unwrap_or_default();
-        if !manufacturer.eq_ignore_ascii_case("flydigi") {
+        let product = handle.read_product_string_ascii(&desc).unwrap_or_default();
+        if !manufacturer.eq_ignore_ascii_case("flydigi") && !product.to_ascii_lowercase().contains("flydigi") {
             continue;
         }
-        let product = handle.read_product_string_ascii(&desc).unwrap_or_default();
         handle.set_auto_detach_kernel_driver(true)?;
         handle.claim_interface(IFACE).context("claiming interface 0")?;
         return Ok(Some((handle, product)));
@@ -45,7 +46,7 @@ impl Transport {
     /// The kernel driver (xpad) is detached while the transport is alive and reattached on drop.
     pub fn open() -> Result<Self> {
         let Some((handle, product)) = find()? else {
-            bail!("no Flydigi device (045e:028e, manufacturer \"Flydigi\") found");
+            bail!("no Flydigi device (045e:028e) found");
         };
         let t = Transport { handle: RefCell::new(handle), product, trace: false, last_sent: Default::default() };
         t.drain();

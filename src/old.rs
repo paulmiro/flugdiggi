@@ -467,7 +467,9 @@ impl Controller {
             args[11] = i as u8;
             self.send(&cmd(blob.packet_cmd(), &args))?;
             let timeout = if i == 0 { Duration::from_secs(3) } else { Duration::from_secs(1) };
-            let Some(ack) = self.t.read_until(timeout, |p| is_reply(p) && p[15] == blob.packet_cmd())? else {
+            // Wired, replies are sometimes sent twice, so a duplicate of the previous ack is skipped.
+            let pkt = blob.packet_cmd();
+            let Some(ack) = self.t.read_until(timeout, |p| is_reply(p) && p[15] == pkt && p[16] as usize > i)? else {
                 bail!("no ack for packet {i}");
             };
             if ack[16] as usize != i + 1 || &ack[17..27] != *chunk {
