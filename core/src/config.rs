@@ -18,6 +18,21 @@ pub const CONFIG_LEN: usize = 840;
 /// Button table: 32 entries of (target, turbo mode, turbo rate).
 pub(crate) const KEYS: Range<usize> = 13..109;
 const BUTTONS: usize = 32;
+
+/// Button IDs outside the button table that a macro can name to stay unapplied: the macro record needs
+/// some button, and the firmware stores these without any table entry (tested on a Vader 4 Pro).
+pub const PARKED_MACRO_BUTTONS: std::ops::RangeInclusive<u8> = 250..=254;
+
+/// The parked button name for the macro at `index` (0-4).
+pub fn parked_macro_button(index: usize) -> Option<String> {
+    let id = PARKED_MACRO_BUTTONS.start().checked_add(u8::try_from(index).ok()?)?;
+    PARKED_MACRO_BUTTONS.contains(&id).then(|| key_name(id))
+}
+
+/// True if `name` is a parked macro button, i.e. the macro is not applied to any button.
+pub fn is_parked_macro_button(name: &str) -> bool {
+    key_id(name).is_ok_and(|id| PARKED_MACRO_BUTTONS.contains(&id))
+}
 const STICKS: usize = 109;
 const TRIGGERS: usize = 123;
 const MOTION: usize = 137;
@@ -641,6 +656,9 @@ impl Config {
         let mut macro_buttons = Vec::new();
         for m in &self.macros.list {
             let id = key_id(&m.button)?;
+            if PARKED_MACRO_BUTTONS.contains(&id) {
+                continue;
+            }
             if usize::from(id) >= BUTTONS {
                 invalid!("[macros] button {:?} is not a button of the mapping table", m.button);
             }
@@ -736,6 +754,27 @@ mod tests {
             encode_macros(&c.macros.list, &mut d[MACROS]).unwrap();
             assert_eq!(Config::decode(&d).unwrap(), c, "macros re-encode changes meaning");
         }
+    }
+
+    #[test]
+    fn parked_and_empty_macros_round_trip() {
+        let b = &backups()[0];
+        let mut c = Config::decode(b).unwrap();
+        let step = |at_ms, key: &str, event| Step { at_ms, key: key.to_owned(), event };
+        c.macros.list = vec![
+            Macro {
+                button: parked_macro_button(0).unwrap(),
+                mode: 1,
+                steps: vec![step(0, "lb", 1), step(200, "lb", 0)],
+            },
+            Macro { button: parked_macro_button(1).unwrap(), mode: 1, steps: Vec::new() },
+            Macro { button: "x".to_owned(), mode: 2, steps: vec![step(0, "a", 1), step(100, "a", 0)] },
+        ];
+        let d = c.apply(b).unwrap();
+        let back = Config::decode(&d).unwrap();
+        assert_eq!(back.macros, c.macros);
+        assert_eq!(back.buttons.get("x").map(String::as_str), Some("macro"));
+        assert!(back.buttons.0.iter().all(|(n, _)| !is_parked_macro_button(n)));
     }
 
     #[test]
