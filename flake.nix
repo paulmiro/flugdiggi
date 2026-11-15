@@ -20,6 +20,17 @@
       ];
     in
     {
+      packages = forAllSystems (
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
+        rec {
+          flugdiggi-cli = pkgs.callPackage ./package.nix { };
+          default = flugdiggi-cli;
+        }
+      );
+
       devShells = forAllSystems (
         system:
         let
