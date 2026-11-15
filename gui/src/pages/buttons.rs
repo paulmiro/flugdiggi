@@ -91,9 +91,20 @@ impl FlugApp {
                         }
                     };
                     let default_label = if is_extra(button) { "Nothing (default)" } else { "Default" };
-                    let mut menu = menu.max_h(px(420.)).scrollable(true).item(
+                    let menu = menu.max_h(px(420.)).scrollable(true).item(
                         PopupMenuItem::new(default_label).checked(mapping.is_none() && !has_macro).on_click(set(None)),
                     );
+                    let mut menu =
+                        macro_entries.iter().enumerate().fold(menu.separator(), |menu, (n, (label, here))| {
+                            let this = this.clone();
+                            menu.item(PopupMenuItem::new(label.clone()).checked(*here).on_click(move |_, _, cx| {
+                                this.update(cx, |app, cx| {
+                                    app.edit(cx, |d| model::apply_macro(&mut d.config, n, button));
+                                })
+                                .ok();
+                            }))
+                        });
+                    menu = menu.separator();
                     for t in TARGETS.iter().filter(|t| **t != button) {
                         menu = menu.item(
                             PopupMenuItem::new(key_label(t))
@@ -108,13 +119,7 @@ impl FlugApp {
                                 .on_click(set(Some("none"))),
                         );
                     }
-                    macro_entries.iter().enumerate().fold(menu.separator(), |menu, (n, (label, here))| {
-                        let this = this.clone();
-                        menu.item(PopupMenuItem::new(label.clone()).checked(*here).on_click(move |_, _, cx| {
-                            this.update(cx, |app, cx| app.edit(cx, |d| model::apply_macro(&mut d.config, n, button)))
-                                .ok();
-                        }))
-                    })
+                    menu
                 }
             };
             let mapped = h_flex()

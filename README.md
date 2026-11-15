@@ -166,6 +166,11 @@ event = 0
   `stick_down_right`, `stick_down`, `stick_down_left`, `stick_left`, `stick_up_left` or `stick_center`.
   The stick is fully deflected until the next step for that stick; end with `stick_center`.
 - All modes, intervals and stick steps were tested on hardware; timing was exact to about 1 ms.
+- A macro always owns its button: whatever table entry you write for it, the firmware sets it to "macro". A
+  button marked "macro" without a macro record sends nothing and does not borrow another macro.
+- A macro that should not be applied to any button is parked on a button ID outside the table, 250-254
+  (`key250`..`key254`); the controller stores it and no table entry points at it. Empty records (`steps = []`)
+  are fine too. The desktop app uses this: it always shows five macros, and unapplied ones are parked.
 
 ## Rumble (`export` / `import`)
 
