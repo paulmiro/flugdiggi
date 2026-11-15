@@ -16,9 +16,11 @@ driver, no root (if the device node is accessible), the gamepad is unusable only
 
 ## Build
 
+Requires a Nix with flakes enabled. `nix develop` (or direnv with `use flake`) gives a shell with nightly Rust, rust-analyzer, pkg-config and libusb.
+
 ```sh
-nix-shell --run 'cargo build --release'   # binary: target/release/flugdiggi
-nix-shell --run 'cargo clippy --all-targets && cargo test'
+nix develop -c cargo build --release   # binary: target/release/flugdiggi
+nix develop -c sh -c 'cargo clippy --all-targets && cargo test'
 ```
 
 ## Usage
