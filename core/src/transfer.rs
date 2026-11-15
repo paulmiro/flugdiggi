@@ -163,6 +163,42 @@ impl Controller {
         data
     }
 
+    /// Reads the mapping and LED config of every slot in `slots`, in order.
+    ///
+    /// Reading makes a slot active, and switching back is slow (the controller ignores about a quarter of
+    /// the switch commands), so unlike [`Self::read`] this restores the previously active slot once, at the
+    /// end. `progress` is called with the number of finished slots. On an error the active slot is restored
+    /// too.
+    #[instrument(level = "debug", skip(self, progress))]
+    pub fn read_slots(&mut self, slots: &[Slot], mut progress: impl FnMut(usize)) -> Result<Vec<(Config, Led)>> {
+        let active = self.active_slot()?.slot;
+        let mut blobs = Vec::with_capacity(slots.len());
+        let mut failure = None;
+        for &slot in slots {
+            let pair =
+                self.read_retrying(Blob::Mapping, slot).and_then(|m| Ok((m, self.read_retrying(Blob::Led, slot)?)));
+            match pair {
+                Ok(pair) => {
+                    blobs.push(pair);
+                    progress(blobs.len());
+                }
+                Err(e) => {
+                    failure = Some(e);
+                    break;
+                }
+            }
+        }
+        let restored = self.switch_to(active);
+        if let Some(e) = failure {
+            if let Err(r) = restored {
+                warn!("could not restore slot {active} after a failed read: {r}");
+            }
+            return Err(e);
+        }
+        restored?;
+        blobs.iter().map(|(m, l)| Ok((Config::decode(m)?, Led::decode(l)?))).collect()
+    }
+
     pub fn read_config(&mut self, slot: Slot) -> Result<Config> {
         Config::decode(&self.read(Blob::Mapping, slot)?)
     }

@@ -43,14 +43,13 @@ pub fn load(port: &UsbPort, progress: &AtomicUsize) -> Result<Loaded> {
     let mut c = open(port)?;
     let info = c.info().wrap_err("reading the device info")?;
     let active = c.active_slot().wrap_err("reading the active slot")?;
-    let mut slots = Vec::new();
-    for n in 0..SLOTS {
-        let slot = Slot::new(n)?;
-        let config = c.read_config(slot).wrap_err_with(|| format!("reading the config of slot {slot}"))?;
-        let led = c.read_led(slot).wrap_err_with(|| format!("reading the LED config of slot {slot}"))?;
-        slots.push(SlotData::new(config, led));
-        progress.fetch_add(1, Ordering::Relaxed);
-    }
+    let numbers = (0..SLOTS).map(Slot::new).collect::<Result<Vec<_>, _>>()?;
+    let slots = c
+        .read_slots(&numbers, |done| progress.store(done, Ordering::Relaxed))
+        .wrap_err("reading the slots")?
+        .into_iter()
+        .map(|(config, led)| SlotData::new(config, led))
+        .collect();
     info!(%port, "read all slots");
     Ok(Loaded { info, active, slots })
 }
