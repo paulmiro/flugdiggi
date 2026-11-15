@@ -1,6 +1,6 @@
 //! Editable slot data and the controller-specific tables the pages are built from.
 
-use flugdiggi_core::config::{Config, Macro, Turbo};
+use flugdiggi_core::config::{Config, Macro, Turbo, is_parked_macro_button, parked_macro_button};
 use flugdiggi_core::led::{Led, Leds};
 
 /// Number of slots: 0-3 for `XInput` mode, 4-7 for Switch mode.
@@ -10,6 +10,9 @@ pub const FRAMES: usize = 10;
 pub const MAX_MACROS: usize = 5;
 /// Pause between macro repeats the official app starts with.
 const DEFAULT_PAUSE_MS: u16 = 30;
+/// Size of the macro block in the config (bytes 230-767) and of its header (count and offsets).
+const MACRO_BLOCK_BYTES: usize = 538;
+const MACRO_HEADER_BYTES: usize = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
@@ -340,8 +343,15 @@ pub fn turbo_of<'a>(config: &'a Config, button: &str) -> Option<&'a Turbo> {
     config.turbo.get(button).filter(|t| t.mode != "off")
 }
 
-pub fn macro_index(config: &Config, button: &str) -> Option<usize> {
-    config.macros.list.iter().position(|m| m.button == button)
+/// The button macro `index` is applied to. A macro parked on a button the user can't see, or on one of
+/// another model, counts as not applied.
+pub fn macro_button(config: &Config, index: usize) -> Option<&str> {
+    let m = config.macros.list.get(index)?;
+    BUTTONS.contains(&m.button.as_str()).then_some(m.button.as_str())
+}
+
+pub fn macro_on_button(config: &Config, button: &str) -> Option<usize> {
+    (0..MAX_MACROS).find(|&i| macro_button(config, i) == Some(button))
 }
 
 /// Sets or removes a button's mapping (`None` = acts as itself).
@@ -359,53 +369,214 @@ pub fn set_turbo(config: &mut Config, button: &str, turbo: Option<Turbo>) {
     }
 }
 
-/// Adds a macro on the first button that has none; returns its index.
-pub fn add_macro(config: &mut Config) -> Option<usize> {
-    if config.macros.list.len() >= MAX_MACROS {
+/// Makes sure records 0..=`index` exist (new ones are empty and parked) and returns record `index`.
+pub fn ensure_macro(config: &mut Config, index: usize) -> Option<&mut Macro> {
+    if index >= MAX_MACROS {
         return None;
     }
-    let free = |b: &&&str| macro_index(config, b).is_none();
-    let unused = |b: &&&str| config.buttons.get(b).is_none() && config.turbo.get(b).is_none();
-    let button = BUTTONS.iter().rev().find(|b| free(b) && unused(b)).or_else(|| BUTTONS.iter().rev().find(free))?;
-    set_mapping(config, button, None);
-    set_turbo(config, button, None);
-    config.macros.list.push(Macro { button: (*button).to_owned(), mode: 1, steps: Vec::new() });
-    Some(config.macros.list.len().saturating_sub(1))
-}
-
-/// Adds an empty macro on `button`; returns its index.
-pub fn add_macro_on(config: &mut Config, button: &str) -> Option<usize> {
-    if config.macros.list.len() >= MAX_MACROS || macro_index(config, button).is_some() {
-        return None;
+    while config.macros.list.len() <= index {
+        let button = parked_macro_button(config.macros.list.len())?;
+        config.macros.list.push(Macro { button, mode: 1, steps: Vec::new() });
     }
-    set_mapping(config, button, None);
-    set_turbo(config, button, None);
-    config.macros.list.push(Macro { button: button.to_owned(), mode: 1, steps: Vec::new() });
-    Some(config.macros.list.len().saturating_sub(1))
+    config.macros.list.get_mut(index)
 }
 
-pub fn remove_macro(config: &mut Config, index: usize) {
-    if index < config.macros.list.len() {
-        let m = config.macros.list.remove(index);
-        set_mapping(config, &m.button, None);
-        // The pause table is positional, so the later macros' pauses move up with them.
-        if index < config.macros.intervals_ms.len() {
-            config.macros.intervals_ms.remove(index);
-            config.macros.intervals_ms.push(DEFAULT_PAUSE_MS);
-        }
+/// Drops trailing records that hold nothing, so unused macros take no space on the controller.
+pub fn trim_macros(config: &mut Config) {
+    while config.macros.list.last().is_some_and(|m| m.steps.is_empty() && is_parked_macro_button(&m.button)) {
+        config.macros.list.pop();
     }
 }
 
-/// Moves a macro to another button; the old button acts as itself again.
-pub fn set_macro_button(config: &mut Config, index: usize, button: &str) {
-    if macro_index(config, button).is_some() {
+/// Edits macro `index`, creating its record if needed.
+pub fn edit_macro(config: &mut Config, index: usize, f: impl FnOnce(&mut Macro)) {
+    if let Some(m) = ensure_macro(config, index) {
+        f(m);
+    }
+    trim_macros(config);
+}
+
+/// Takes macro `index` off its button, which then acts as itself again. The steps stay.
+pub fn unapply_macro(config: &mut Config, index: usize) {
+    let Some(old) = config.macros.list.get(index).map(|m| m.button.clone()) else { return };
+    if is_parked_macro_button(&old) {
         return;
     }
-    let Some(old) = config.macros.list.get(index).map(|m| m.button.clone()) else { return };
     set_mapping(config, &old, None);
+    if let (Some(parked), Some(m)) = (parked_macro_button(index), config.macros.list.get_mut(index)) {
+        m.button = parked;
+    }
+}
+
+/// Applies macro `index` to `button`. A macro already on `button` is taken off it, and the macro's
+/// previous button acts as itself again.
+pub fn apply_macro(config: &mut Config, index: usize, button: &str) {
+    if macro_button(config, index) == Some(button) {
+        return;
+    }
+    if let Some(other) = macro_on_button(config, button) {
+        unapply_macro(config, other);
+    }
+    if ensure_macro(config, index).is_none() {
+        return;
+    }
+    unapply_macro(config, index);
     set_mapping(config, button, None);
     set_turbo(config, button, None);
     if let Some(m) = config.macros.list.get_mut(index) {
         button.clone_into(&mut m.button);
+    }
+    trim_macros(config);
+}
+
+/// Empties macro `index` and takes it off its button.
+pub fn clear_macro(config: &mut Config, index: usize) {
+    unapply_macro(config, index);
+    if let Some(m) = config.macros.list.get_mut(index) {
+        m.steps.clear();
+        m.mode = 1;
+    }
+    if let Some(p) = config.macros.intervals_ms.get_mut(index) {
+        *p = DEFAULT_PAUSE_MS;
+    }
+    trim_macros(config);
+}
+
+/// Steps that can still be added before the macro block of the config is full.
+pub fn macro_steps_free(config: &Config, index: usize) -> usize {
+    let records = config.macros.list.len().max(index.saturating_add(1));
+    let steps: usize = config.macros.list.iter().map(|m| m.steps.len()).sum();
+    let used = steps.saturating_add(records).saturating_mul(4).saturating_add(MACRO_HEADER_BYTES);
+    MACRO_BLOCK_BYTES.saturating_sub(used) / 4
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flugdiggi_core::config::Step;
+
+    fn blob() -> Vec<u8> {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../core/testdata");
+        let mut files: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).collect();
+        files.sort();
+        let f = files.into_iter().find(|p| p.extension().is_some_and(|x| x == "bin")).unwrap();
+        std::fs::read(f).unwrap()
+    }
+
+    fn base() -> (Config, Vec<u8>) {
+        let b = blob();
+        let mut c = Config::decode(&b).unwrap();
+        c.macros.list.clear();
+        c.buttons.0.clear();
+        c.turbo.0.clear();
+        (c, b)
+    }
+
+    fn step(at_ms: u32) -> Step {
+        Step { at_ms, key: "a".to_owned(), event: EVENT_PRESS }
+    }
+
+    /// Encodes and decodes, so every rule is checked against what the controller would store.
+    fn stored(c: &Config, b: &[u8]) -> Config {
+        Config::decode(&c.apply(b).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_fresh_config_has_no_records_and_every_macro_is_unapplied() {
+        let (c, _) = base();
+        assert!((0..MAX_MACROS).all(|i| macro_button(&c, i).is_none()));
+        assert_eq!(c.macros.list.len(), 0);
+    }
+
+    #[test]
+    fn editing_a_later_macro_creates_parked_empty_records_before_it() {
+        let (mut c, b) = base();
+        edit_macro(&mut c, 2, |m| m.steps.push(step(0)));
+        assert_eq!(c.macros.list.len(), 3);
+        assert!(c.macros.list.iter().all(|m| is_parked_macro_button(&m.button)));
+        assert!(c.macros.list.iter().take(2).all(|m| m.steps.is_empty()));
+        assert_eq!(stored(&c, &b).macros, c.macros);
+    }
+
+    #[test]
+    fn applying_moves_the_macro_and_frees_its_old_button() {
+        let (mut c, b) = base();
+        edit_macro(&mut c, 0, |m| m.steps.push(step(0)));
+        apply_macro(&mut c, 0, "x");
+        assert_eq!(macro_on_button(&c, "x"), Some(0));
+        apply_macro(&mut c, 0, "y");
+        assert_eq!(macro_on_button(&c, "x"), None);
+        assert_eq!(macro_on_button(&c, "y"), Some(0));
+        let s = stored(&c, &b);
+        assert_eq!(s.buttons.get("y").map(String::as_str), Some("macro"));
+        assert!(s.buttons.get("x").is_none());
+    }
+
+    #[test]
+    fn applying_a_macro_to_a_taken_button_unapplies_the_other_one() {
+        let (mut c, b) = base();
+        edit_macro(&mut c, 0, |m| m.steps.push(step(0)));
+        edit_macro(&mut c, 1, |m| m.steps.push(step(0)));
+        apply_macro(&mut c, 0, "x");
+        apply_macro(&mut c, 1, "x");
+        assert_eq!(macro_on_button(&c, "x"), Some(1));
+        assert_eq!(macro_button(&c, 0), None);
+        assert_eq!(c.macros.list.first().map(|m| m.steps.len()), Some(1), "the steps stay");
+        let s = stored(&c, &b);
+        assert_eq!(s.macros, c.macros);
+    }
+
+    #[test]
+    fn applying_replaces_the_buttons_mapping_and_turbo() {
+        let (mut c, b) = base();
+        set_mapping(&mut c, "x", Some("b"));
+        set_turbo(&mut c, "x", Some(Turbo { rate: 10, mode: "hold".to_owned() }));
+        edit_macro(&mut c, 0, |m| m.steps.push(step(0)));
+        apply_macro(&mut c, 0, "x");
+        let s = stored(&c, &b);
+        assert_eq!(s.buttons.get("x").map(String::as_str), Some("macro"));
+        assert!(turbo_of(&s, "x").is_none());
+    }
+
+    #[test]
+    fn unapplying_keeps_the_steps_and_returns_the_button_to_its_default() {
+        let (mut c, b) = base();
+        edit_macro(&mut c, 0, |m| m.steps.push(step(0)));
+        apply_macro(&mut c, 0, "x");
+        unapply_macro(&mut c, 0);
+        assert_eq!(macro_button(&c, 0), None);
+        let s = stored(&c, &b);
+        assert!(s.buttons.get("x").is_none());
+        assert_eq!(s.macros.list.first().map(|m| m.steps.len()), Some(1));
+    }
+
+    #[test]
+    fn clearing_removes_steps_and_trailing_records() {
+        let (mut c, _) = base();
+        edit_macro(&mut c, 1, |m| m.steps.push(step(0)));
+        apply_macro(&mut c, 1, "x");
+        clear_macro(&mut c, 1);
+        assert_eq!(c.macros.list.len(), 0);
+        assert!(c.buttons.get("x").is_none());
+    }
+
+    #[test]
+    fn pauses_belong_to_their_slot() {
+        let (mut c, b) = base();
+        edit_macro(&mut c, 2, |m| m.steps.push(step(0)));
+        c.macros.intervals_ms = vec![30, 30, 120, 30, 30];
+        clear_macro(&mut c, 0);
+        assert_eq!(c.macros.intervals_ms, vec![30, 30, 120, 30, 30]);
+        assert_eq!(stored(&c, &b).macros.intervals_ms, c.macros.intervals_ms);
+    }
+
+    #[test]
+    fn free_steps_count_the_records_a_new_macro_needs() {
+        let (mut c, _) = base();
+        // 538 - 6 header bytes = 532 = 133 units of 4 bytes; one record takes 1 unit.
+        assert_eq!(macro_steps_free(&c, 0), 132);
+        assert_eq!(macro_steps_free(&c, 4), 128);
+        edit_macro(&mut c, 0, |m| m.steps.extend((0..10).map(|i| step(i * 10))));
+        assert_eq!(macro_steps_free(&c, 0), 122);
     }
 }

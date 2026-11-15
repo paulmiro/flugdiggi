@@ -9,7 +9,7 @@ use gpui_kit::*;
 use crate::app::FlugApp;
 use crate::model::{
     self, BUTTONS, EVENT_LEFT_STICK, EVENT_PRESS, EVENT_RELEASE, EVENT_RIGHT_STICK, MAX_MACROS, STICK_DIRECTIONS,
-    TARGETS, key_label, macro_index,
+    TARGETS, key_label, macro_button, macro_steps_free,
 };
 use crate::theme::Colors;
 use crate::widgets::{byte, card, heading, note, row, segmented, slider_row};
@@ -37,14 +37,6 @@ fn action_event(index: usize) -> u8 {
 
 fn is_stick(event: u8) -> bool {
     matches!(event, EVENT_LEFT_STICK | EVENT_RIGHT_STICK)
-}
-
-fn mode_text(m: &Macro) -> &'static str {
-    match m.mode {
-        2 => "repeat while held",
-        3 => "toggle repeat",
-        _ => "once",
-    }
 }
 
 /// Bars of the timeline: (row label, start ms, end ms).
@@ -87,21 +79,30 @@ fn timeline_bars(m: &Macro) -> (Vec<String>, Vec<(usize, u32, u32)>, u32) {
 
 impl FlugApp {
     fn edit_macro(&mut self, cx: &mut Context<Self>, index: usize, f: impl FnOnce(&mut Macro)) {
-        self.edit(cx, |d| {
-            if let Some(m) = d.config.macros.list.get_mut(index) {
-                f(m);
-            }
-        });
+        self.edit(cx, |d| model::edit_macro(&mut d.config, index, f));
     }
 
     pub fn render_macros(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(d) = self.current().cloned() else { return div().into_any_element() };
-        let list = &d.config.macros.list;
-        let sel = self.macro_sel.min(list.len().saturating_sub(1));
+        let sel = self.macro_sel.min(MAX_MACROS.saturating_sub(1));
         let muted = cx.theme().muted_foreground;
         let this = cx.entity().downgrade();
+        let empty = |i: usize| Macro {
+            button: flugdiggi_core::config::parked_macro_button(i).unwrap_or_default(),
+            mode: 1,
+            steps: Vec::new(),
+        };
+        let macro_of = |i: usize| d.config.macros.list.get(i).cloned().unwrap_or_else(|| empty(i));
+        let steps_text = |m: &Macro| match m.steps.len() {
+            0 => "empty".to_owned(),
+            1 => "1 step".to_owned(),
+            n => format!("{n} steps"),
+        };
 
-        let items = list.iter().enumerate().map(|(i, m)| {
+        let items = (0..MAX_MACROS).map(|i| {
+            let m = macro_of(i);
+            let applied =
+                macro_button(&d.config, i).map_or_else(|| "Not applied".to_owned(), |b| format!("on {}", key_label(b)));
             div()
                 .id(("macro", i))
                 .px_3()
@@ -113,57 +114,26 @@ impl FlugApp {
                     a.macro_sel = i;
                     cx.notify();
                 }))
-                .child(h_flex().gap_2().text_sm().child(div().font_semibold().child(key_label(&m.button))).child(
-                    div().text_xs().text_color(muted).child(format!(
-                        "{} · {} ms · {}",
-                        if m.steps.len() == 1 { "1 step".to_owned() } else { format!("{} steps", m.steps.len()) },
-                        m.steps.iter().map(|s| s.at_ms).max().unwrap_or(0),
-                        mode_text(m)
-                    )),
-                ))
+                .child(
+                    v_flex()
+                        .child(div().text_sm().font_semibold().child(format!("Macro {}", i.saturating_add(1))))
+                        .child(div().text_xs().text_color(muted).child(format!("{applied} · {}", steps_text(&m)))),
+                )
         });
         let left = v_flex()
             .w(px(260.))
             .flex_shrink_0()
             .gap_2()
             .child(heading("Macros"))
-            .when(!list.is_empty(), |l| l.child(card(cx).p_1().children(items)))
-            .child(
-                Button::new("new-macro")
-                    .small()
-                    .icon(IconName::Plus)
-                    .label("New macro")
-                    .disabled(list.len() >= MAX_MACROS)
-                    .on_click(cx.listener(|a, _, _, cx| {
-                        let mut index = None;
-                        a.edit(cx, |d| index = model::add_macro(&mut d.config));
-                        if let Some(i) = index {
-                            a.macro_sel = i;
-                        }
-                    })),
-            )
+            .child(card(cx).p_1().children(items))
             .child(note(
-                format!("Up to {MAX_MACROS} macros. A button with a macro shows \"Macro\" on the Buttons page."),
+                "A macro runs when the button it is applied to is pressed. Apply it here or in the Buttons page's mapping menu.",
                 cx,
             ));
 
-        let Some(m) = list.get(sel).cloned() else {
-            return h_flex()
-                .items_start()
-                .gap_4()
-                .child(left)
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .pt_8()
-                        .items_center()
-                        .text_sm()
-                        .text_color(muted)
-                        .child("No macros in this slot."),
-                )
-                .into_any_element();
-        };
-
+        let m = macro_of(sel);
+        let applied = macro_button(&d.config, sel);
+        let free = macro_steps_free(&d.config, sel);
         let interval = d.config.macros.intervals_ms.get(sel).copied().unwrap_or(0);
         let pause = self.slider(
             format!("macro-pause-{sel}"),
@@ -180,25 +150,33 @@ impl FlugApp {
             cx,
         );
 
-        let button_menu = {
+        let apply_menu = {
             let this = this.clone();
-            let current = m.button.clone();
             let config = d.config.clone();
             Button::new("macro-button")
                 .small()
-                .w(px(130.))
-                .label(key_label(&m.button))
+                .w(px(170.))
+                .label(applied.map_or_else(|| "Not applied".to_owned(), key_label))
                 .dropdown_caret(true)
                 .dropdown_menu(move |menu, _, _| {
-                    BUTTONS.iter().fold(menu.max_h(px(400.)).scrollable(true), |menu, &b| {
+                    let none = {
                         let this = this.clone();
-                        let taken = b != current && macro_index(&config, b).is_some();
-                        menu.item(PopupMenuItem::new(key_label(b)).checked(b == current).disabled(taken).on_click(
+                        PopupMenuItem::new("Not applied").checked(macro_button(&config, sel).is_none()).on_click(
                             move |_, _, cx| {
-                                this.update(cx, |a, cx| a.edit(cx, |d| model::set_macro_button(&mut d.config, sel, b)))
-                                    .ok();
+                                this.update(cx, |a, cx| a.edit(cx, |d| model::unapply_macro(&mut d.config, sel))).ok();
                             },
-                        ))
+                        )
+                    };
+                    BUTTONS.iter().fold(menu.max_h(px(400.)).scrollable(true).item(none), |menu, &b| {
+                        let this = this.clone();
+                        let owner = model::macro_on_button(&config, b);
+                        let label = match owner {
+                            Some(n) if n != sel => format!("{} (Macro {})", key_label(b), n.saturating_add(1)),
+                            _ => key_label(b),
+                        };
+                        menu.item(PopupMenuItem::new(label).checked(owner == Some(sel)).on_click(move |_, _, cx| {
+                            this.update(cx, |a, cx| a.edit(cx, |d| model::apply_macro(&mut d.config, sel, b))).ok();
+                        }))
                     })
                 })
         };
@@ -253,9 +231,11 @@ impl FlugApp {
                     if let Ok(ms) = text.trim().parse::<u32>() {
                         let ms = ms.min(655_350).saturating_div(10).saturating_mul(10);
                         a.edit_silent(|d| {
-                            if let Some(step) = d.config.macros.list.get_mut(sel).and_then(|m| m.steps.get_mut(i)) {
-                                step.at_ms = ms;
-                            }
+                            model::edit_macro(&mut d.config, sel, |m| {
+                                if let Some(step) = m.steps.get_mut(i) {
+                                    step.at_ms = ms;
+                                }
+                            });
                         });
                     }
                 },
@@ -340,23 +320,27 @@ impl FlugApp {
             );
         }
         let last_at = m.steps.iter().map(|s| s.at_ms).max();
+        let clearable = !m.steps.is_empty() || applied.is_some();
 
         let right = v_flex()
             .flex_1()
             .min_w_0()
             .gap_2()
             .child(
-                h_flex()
-                    .justify_between()
-                    .child(heading(format!("Macro on {}", key_label(&m.button))))
-                    .child(Button::new("delete-macro").small().label("Delete macro").on_click(cx.listener(move |a, _, _, cx| {
-                        a.edit(cx, |d| model::remove_macro(&mut d.config, sel));
-                        a.macro_sel = sel.saturating_sub(1);
-                    }))),
+                h_flex().justify_between().child(heading(format!("Macro {}", sel.saturating_add(1)))).child(
+                    Button::new("clear-macro").small().label("Clear macro").disabled(!clearable).on_click(cx.listener(
+                        move |a, _, _, cx| {
+                            a.edit(cx, |d| model::clear_macro(&mut d.config, sel));
+                        },
+                    )),
+                ),
             )
             .child(
                 card(cx)
-                    .child(row("Button", Some("Pressing it plays the macro instead"), button_menu, cx).border_t_0())
+                    .child(
+                        row("Applied to", Some("Pressing this button plays the macro instead"), apply_menu, cx)
+                            .border_t_0(),
+                    )
                     .child(row(
                         "Plays",
                         None,
@@ -369,7 +353,9 @@ impl FlugApp {
                         }),
                         cx,
                     ))
-                    .when(m.mode >= 2, |c| c.child(slider_row("Pause between repeats", &pause, format!("{interval} ms"), false, cx))),
+                    .when(m.mode >= 2, |c| {
+                        c.child(slider_row("Pause between repeats", &pause, format!("{interval} ms"), false, cx))
+                    }),
             )
             .child(heading("Timeline").mt_2())
             .child(card(cx).child(if labels.is_empty() {
@@ -379,14 +365,26 @@ impl FlugApp {
             }))
             .child(
                 h_flex().mt_2().justify_between().child(heading("Steps")).child(
-                    Button::new("add-step").small().icon(IconName::Plus).label("Add step").on_click(cx.listener(move |a, _, _, cx| {
-                        let at = last_at.map_or(0, |t| t.saturating_add(40));
-                        a.edit_macro(cx, sel, |m| m.steps.push(Step { at_ms: at, key: "a".to_owned(), event: EVENT_PRESS }));
-                    })),
+                    Button::new("add-step")
+                        .small()
+                        .icon(IconName::Plus)
+                        .label("Add step")
+                        .disabled(free == 0)
+                        .on_click(cx.listener(move |a, _, _, cx| {
+                            let at = last_at.map_or(0, |t| t.saturating_add(40));
+                            a.edit_macro(cx, sel, |m| {
+                                m.steps.push(Step { at_ms: at, key: "a".to_owned(), event: EVENT_PRESS });
+                            });
+                        })),
                 ),
             )
             .when(!step_rows.is_empty(), |r| r.child(card(cx).children(step_rows)))
-            .child(note("Times count from the button press, in steps of 10 ms. Stick steps hold the stick until the next step for that stick.", cx));
+            .child(note(
+                format!(
+                    "Times count from the button press, in steps of 10 ms. Stick steps hold the stick until the next step for that stick. All macros share space for {free} more steps."
+                ),
+                cx,
+            ));
 
         h_flex().items_start().gap_4().child(left).child(right).into_any_element()
     }
