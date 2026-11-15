@@ -21,7 +21,10 @@ const BUTTONS: usize = 32;
 
 /// Button IDs outside the button table that a macro can name to stay unapplied: the macro record needs
 /// some button, and the firmware stores these without any table entry (tested on a Vader 4 Pro).
-pub const PARKED_MACRO_BUTTONS: std::ops::RangeInclusive<u8> = 250..=254;
+///
+/// The range sits in the large gap of IDs the official app never uses (it knows 0-28, 32, 160-168, 240-242
+/// and the sentinels 254 = keyboard/mouse and 255 = none), below 128, and far above the 32 table entries.
+pub const PARKED_MACRO_BUTTONS: std::ops::RangeInclusive<u8> = 100..=104;
 
 /// The parked button name for the macro at `index` (0-4).
 pub fn parked_macro_button(index: usize) -> Option<String> {
