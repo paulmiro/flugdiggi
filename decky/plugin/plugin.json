@@ -1,0 +1,11 @@
+{
+  "name": "Flugdiggi",
+  "author": "flugdiggi",
+  "flags": ["root"],
+  "api_version": 1,
+  "publish": {
+    "tags": ["controller", "root"],
+    "description": "Edit the button mapping stored in a Flydigi Vader 4 controller.",
+    "image": "https://opengraph.githubassets.com/1/SteamDeckHomebrew/PluginLoader"
+  }
+}

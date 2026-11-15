@@ -1754,6 +1754,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "flugdiggi-decky"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "flugdiggi-core",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "flugdiggi-gui"
 version = "0.1.0"
 dependencies = [

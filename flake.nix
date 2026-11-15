@@ -10,7 +10,7 @@
   };
 
   outputs =
-    { nixpkgs, rust-overlay, ... }:
+    { self, nixpkgs, rust-overlay, ... }:
     let
       forAllSystems = nixpkgs.lib.genAttrs [
         "x86_64-linux"
@@ -28,9 +28,13 @@
         rec {
           flugdiggi-cli = pkgs.callPackage ./package.nix { };
           flugdiggi-gui = pkgs.callPackage ./gui.nix { };
+          flugdiggi-decky = flugdiggi-decky-plugin.helper;
+          flugdiggi-decky-plugin = pkgs.callPackage ./decky.nix { };
           default = flugdiggi-cli;
         }
       );
+
+      nixosModules.decky-plugin = import ./decky-module.nix self;
 
       devShells = forAllSystems (
         system:

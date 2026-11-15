@@ -19,6 +19,8 @@ rustPlatform.buildRustPackage {
       ./clippy.toml
       ./core
       ./cli
+      ./decky/Cargo.toml
+      ./decky/src
     ];
   };
 

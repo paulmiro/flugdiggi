@@ -42,6 +42,8 @@ rustPlatform.buildRustPackage {
       ./core
       ./cli
       ./gui
+      ./decky/Cargo.toml
+      ./decky/src
     ];
   };
 

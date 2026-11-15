@@ -1,0 +1,21 @@
+[package]
+name = "flugdiggi-decky"
+description = "Helper binary of the flugdiggi Decky Loader plugin: JSON in, JSON out"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "flugdiggi-decky"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+clap = { workspace = true, features = ["derive"] }
+flugdiggi-core.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
