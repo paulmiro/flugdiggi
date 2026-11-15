@@ -27,6 +27,7 @@
         in
         rec {
           flugdiggi-cli = pkgs.callPackage ./package.nix { };
+          flugdiggi-gui = pkgs.callPackage ./gui.nix { };
           default = flugdiggi-cli;
         }
       );
@@ -38,6 +39,25 @@
             inherit system;
             overlays = [ rust-overlay.overlays.default ];
           };
+          guiLibs = with pkgs; [
+            libusb1
+            fontconfig
+            freetype
+            libxkbcommon
+            wayland
+            libx11
+            libxcb
+          ];
+          guiRuntimeLibs = with pkgs; [
+            vulkan-loader
+            wayland
+            libxkbcommon
+            libx11
+            libxcb
+            libxcursor
+            libxi
+            libxrandr
+          ];
           rust = pkgs.rust-bin.selectLatestNightlyWith (
             toolchain:
             toolchain.default.override {
@@ -53,8 +73,9 @@
             packages = [
               rust
               pkgs.pkg-config
-              pkgs.libusb1
             ];
+            buildInputs = guiLibs;
+            LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath guiRuntimeLibs;
           };
         }
       );

@@ -13,6 +13,7 @@ driver, no root (if the device node is accessible), the gamepad is unusable only
   verified writing of the per-slot blobs, TOML-friendly `Config`/`Led` types). Errors are typed
   (`flugdiggi_core::Error`), logging goes through `tracing`. Meant to be shared by other front ends.
 - `cli` (`flugdiggi-cli`): the `flugdiggi` command line tool (clap, color-eyre).
+- `gui` (`flugdiggi-gui`): the `flugdiggi-gui` desktop app ([GPUI Kit](https://gpui-kit.com)).
 
 ## Build
 
@@ -21,6 +22,7 @@ Requires a Nix with flakes enabled. `nix develop` (or direnv with `use flake`) g
 ```sh
 nix build                               # package flugdiggi-cli, binary: result/bin/flugdiggi
 nix run . -- list
+nix run .#flugdiggi-gui                 # the desktop app
 nix develop -c cargo build --release   # binary: target/release/flugdiggi
 nix develop -c sh -c 'cargo clippy --all-targets && cargo test'
 ```
@@ -75,6 +77,15 @@ only if it reports the same MAC.
   reloads the slot and verifies both its mapping and LED config. A write takes about 7 s.
 - `info` reports the battery as a level 0-5 (6 = charging).
 - The LED shown is the active slot's LED config.
+
+## Desktop app (`flugdiggi-gui`)
+
+Lists all connected controllers in the sidebar (polled every 3 s, without claiming them). Selecting one
+reads all 8 slots (about 3 s; games lose the controller for that time). Edits stay in the app until **Save**,
+which writes the selected slot, saves it to flash and verifies it, after saving the slot's previous content to
+`~/.local/share/flugdiggi/backups/`. Switching to another slot or controller with unsaved edits asks whether
+to save or discard them. Settings the official app does not show are under **Advanced**. Log output goes to
+stderr (`RUST_LOG` works as for the CLI).
 
 ## LED config (`led-export` / `led-import`)
 
