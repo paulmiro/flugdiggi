@@ -8,6 +8,8 @@ pub const SLOTS: u8 = 8;
 /// Animation steps stored per LED.
 pub const FRAMES: usize = 10;
 pub const MAX_MACROS: usize = 5;
+/// Pause between macro repeats the official app starts with.
+const DEFAULT_PAUSE_MS: u16 = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
@@ -386,6 +388,11 @@ pub fn remove_macro(config: &mut Config, index: usize) {
     if index < config.macros.list.len() {
         let m = config.macros.list.remove(index);
         set_mapping(config, &m.button, None);
+        // The pause table is positional, so the later macros' pauses move up with them.
+        if index < config.macros.intervals_ms.len() {
+            config.macros.intervals_ms.remove(index);
+            config.macros.intervals_ms.push(DEFAULT_PAUSE_MS);
+        }
     }
 }
 
