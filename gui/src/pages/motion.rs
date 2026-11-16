@@ -115,10 +115,7 @@ impl FlugApp {
                     )
                     .border_t_0(),
                 )
-                .child(
-                    row("Turn on with", Some("Gyro only works while this button does"), enable_menu, cx)
-                        .when(off, |r| r.opacity(0.4)),
-                )
+                .child(row("Turn on with", None, enable_menu, cx).when(off, |r| r.opacity(0.4)))
                 .child(
                     row(
                         "Button mode",
@@ -136,10 +133,13 @@ impl FlugApp {
                 .child(
                     row(
                         "Use",
-                        None,
+                        Some(
+                            "Shooting: turning the controller moves the camera (with the right stick or mouse). \
+                             Racing: tilting it steers like a wheel (with the left stick).",
+                        ),
                         segmented(
                             "motion-use",
-                            &["Aiming", "Racing"],
+                            &["Shooting", "Racing"],
                             Some(usize::from(m.use_mode.min(1))),
                             pick(|m, v| m.use_mode = v),
                         ),
