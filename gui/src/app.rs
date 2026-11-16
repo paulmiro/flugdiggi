@@ -580,59 +580,75 @@ impl FlugApp {
                 .child(if n == 1 { "1 unsaved change".to_owned() } else { format!("{n} unsaved changes") })
                 .into_any_element(),
         };
-        TitleBar::new().child(
-            h_flex()
-                .flex_1()
-                .h_full()
-                .pr_2()
-                .gap_2()
-                .when(has_data, |d| {
-                    d.child(
-                        TabBar::new("pages")
-                            .pill()
-                            .small()
-                            .selected_index(selected)
-                            .children(Page::ALL.iter().map(|p| Tab::new().label(p.label())))
-                            .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                                if let Some(p) = Page::ALL.get(*ix) {
-                                    this.page = *p;
-                                    this.picker = None;
-                                    cx.notify();
-                                }
-                            })),
-                    )
-                })
-                .child(div().flex_1())
-                .child(div().text_sm().text_color(cx.theme().muted_foreground).child(status))
-                .when(has_data, |d| {
-                    d.child(
-                        Button::new("discard")
-                            .label("Discard")
-                            .small()
-                            .disabled(changes == 0 || busy.is_some())
-                            .on_click(cx.listener(|this, _, _, cx| this.discard(cx))),
-                    )
-                    .child(
-                        Button::new("save")
-                            .label("Save")
-                            .primary()
-                            .small()
-                            .disabled(changes == 0 || busy.is_some())
-                            .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
-                    )
-                })
-                .child(Button::new("menu").icon(IconName::Menu).ghost().small().dropdown_menu(move |menu, _, _| {
-                    let (reload, backups) = (this.clone(), this.clone());
-                    menu.item(PopupMenuItem::new("Read again from the controller").disabled(!has_data).on_click(
-                        move |_, _, cx| {
-                            reload.update(cx, Self::reload).ok();
+        let close = cx.entity().downgrade();
+        TitleBar::new()
+            .on_close_window(move |_, window, cx| {
+                let dirty = close.upgrade().is_some_and(|t| t.read(cx).current().is_some_and(SlotData::is_dirty));
+                if dirty {
+                    open_quit_dialog(window, cx);
+                } else {
+                    window.remove_window();
+                }
+            })
+            .child(
+                h_flex()
+                    .flex_1()
+                    .h_full()
+                    .pr_2()
+                    .gap_2()
+                    .when(has_data, |d| {
+                        d.child(
+                            TabBar::new("pages")
+                                .pill()
+                                .small()
+                                .selected_index(selected)
+                                .children(Page::ALL.iter().map(|p| Tab::new().label(p.label())))
+                                .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                                    if let Some(p) = Page::ALL.get(*ix) {
+                                        this.page = *p;
+                                        this.picker = None;
+                                        cx.notify();
+                                    }
+                                })),
+                        )
+                    })
+                    .child(div().flex_1())
+                    .child(div().text_sm().text_color(cx.theme().muted_foreground).child(status))
+                    .when(has_data, |d| {
+                        d.child(
+                            Button::new("discard")
+                                .label("Discard")
+                                .small()
+                                .disabled(changes == 0 || busy.is_some())
+                                .on_click(cx.listener(|this, _, _, cx| this.discard(cx))),
+                        )
+                        .child(
+                            Button::new("save")
+                                .label("Save")
+                                .primary()
+                                .small()
+                                .disabled(changes == 0 || busy.is_some())
+                                .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
+                        )
+                    })
+                    .child(Button::new("menu").icon(IconName::Menu).ghost().small().dropdown_menu(
+                        move |menu, _, _| {
+                            let (reload, backups) = (this.clone(), this.clone());
+                            menu.item(
+                                PopupMenuItem::new("Read again from the controller").disabled(!has_data).on_click(
+                                    move |_, _, cx| {
+                                        reload.update(cx, Self::reload).ok();
+                                    },
+                                ),
+                            )
+                            .item(PopupMenuItem::new("Open backups folder").on_click(
+                                move |_, _, cx| {
+                                    backups.update(cx, |_, cx| Self::open_backups(cx)).ok();
+                                },
+                            ))
                         },
-                    ))
-                    .item(PopupMenuItem::new("Open backups folder").on_click(move |_, _, cx| {
-                        backups.update(cx, |_, cx| Self::open_backups(cx)).ok();
-                    }))
-                })),
-        )
+                    )),
+            )
     }
 
     fn render_body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
