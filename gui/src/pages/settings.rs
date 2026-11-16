@@ -71,7 +71,7 @@ impl FlugApp {
                             .small()
                             .label(if is_active { "Active" } else { "Activate" })
                             .disabled(is_active || switch_mode || busy)
-                            .on_click(cx.listener(|a, _, _, cx| a.activate(cx))),
+                            .on_click(cx.listener(|a, _, window, cx| a.request_activate(a.slot, window, cx))),
                         cx,
                     )),
             )

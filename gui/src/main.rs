@@ -19,7 +19,10 @@ use gpui_kit::*;
 use tracing::error;
 use tracing_subscriber::EnvFilter;
 
-gpui_kit::assets::icon_assets!(ExtraIcons, [Gamepad2, Pencil, RotateCcw]);
+gpui_kit::assets::icon_assets!(
+    ExtraIcons,
+    [Battery, BatteryCharging, BatteryFull, BatteryLow, BatteryMedium, Gamepad2, Pencil, RotateCcw]
+);
 
 struct AppAssets;
 

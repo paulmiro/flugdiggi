@@ -50,6 +50,8 @@ struct Busy {
 enum Nav {
     Slot(usize),
     Controller(UsbPort),
+    /// Make the controller use this slot.
+    Activate(usize),
 }
 
 pub struct FlugApp {
@@ -330,9 +332,18 @@ impl FlugApp {
         self.edit(cx, SlotData::discard);
     }
 
-    pub fn activate(&mut self, cx: &mut Context<Self>) {
+    /// Makes the controller use `slot`. Unsaved edits of that slot are saved or discarded first.
+    pub fn request_activate(&mut self, slot: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if slot == self.slot {
+            self.navigate(Nav::Activate(slot), window, cx);
+        } else if !self.is_busy() {
+            self.activate(slot, cx);
+        }
+    }
+
+    fn activate(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(port) = self.selected.clone() else { return };
-        let Ok(slot) = Slot::new(u8::try_from(self.slot).unwrap_or(u8::MAX)) else { return };
+        let Ok(slot) = Slot::new(u8::try_from(index).unwrap_or(u8::MAX)) else { return };
         self.run(
             format!("Activating slot {slot}"),
             None,
@@ -400,6 +411,7 @@ impl FlugApp {
         match nav {
             Nav::Slot(s) => self.slot = s,
             Nav::Controller(port) => self.select_controller(port, cx),
+            Nav::Activate(s) => self.activate(s, cx),
         }
         cx.notify();
     }

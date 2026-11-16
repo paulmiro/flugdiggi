@@ -6,7 +6,8 @@ use std::sync::Arc;
 use crate::prelude::*;
 use flugdiggi_core::{Battery, Connection};
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::sidebar::{Sidebar, SidebarGroup, SidebarHeader, SidebarItem};
+use gpui_kit::component::sidebar::{Sidebar, SidebarItem};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Collapsible, Icon, IconName, Sizable, h_flex, v_flex};
 use gpui_kit::*;
 
@@ -20,7 +21,7 @@ type Handler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 struct ControllerRow {
     name: SharedString,
     detail: SharedString,
-    battery: Option<SharedString>,
+    battery: Option<Battery>,
     selected: bool,
     on_click: Handler,
 }
@@ -34,6 +35,8 @@ struct SlotRow {
     active: bool,
     edited: bool,
     on_click: Handler,
+    /// Makes the controller use this slot; `None` where that isn't offered.
+    on_activate: Option<Handler>,
 }
 
 #[derive(Clone)]
@@ -42,7 +45,15 @@ enum Rows {
     Slots(Vec<SlotRow>),
 }
 
-impl Collapsible for Rows {
+/// A labelled group of rows, optionally with a button next to the label.
+#[derive(Clone)]
+struct Group {
+    label: SharedString,
+    action: Option<(IconName, &'static str, Handler)>,
+    rows: Rows,
+}
+
+impl Collapsible for Group {
     fn collapsed(self, _: bool) -> Self {
         self
     }
@@ -65,46 +76,76 @@ fn row_base(id: ElementId, selected: bool, on_click: Handler, cx: &App) -> State
         .on_click(move |e, w, cx| on_click(e, w, cx))
 }
 
-impl SidebarItem for Rows {
-    fn render(self, id: impl Into<ElementId>, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let id: ElementId = id.into();
+/// Icon, colour and hover text for a battery reading. The percentages are an assumption: the
+/// controller only reports levels 0-5.
+fn battery_view(b: Battery, cx: &App) -> (gpui_kit::assets::IconName, Option<Hsla>, String) {
+    use gpui_kit::assets::IconName as I;
+    let danger = Some(cx.theme().danger);
+    match b {
+        Battery::Charging => (I::BatteryCharging, None, "Charging".to_owned()),
+        Battery::Level(n) => {
+            let (icon, color, range) = match n {
+                5.. => (I::BatteryFull, None, "about 80–100 %"),
+                4 => (I::BatteryMedium, None, "about 60–80 %"),
+                3 => (I::BatteryMedium, None, "about 40–60 %"),
+                2 => (I::BatteryLow, None, "about 20–40 %"),
+                1 => (I::BatteryLow, danger, "below about 20 %"),
+                0 => (I::Battery, danger, "almost empty"),
+            };
+            (icon, color, format!("Battery level {n} of 5 ({range})"))
+        }
+    }
+}
+
+impl Rows {
+    fn render(self, id: &ElementId, cx: &App) -> AnyElement {
         let muted = cx.theme().muted_foreground;
+        let child_id = |name: String| ElementId::NamedChild(Arc::new(id.clone()), name.into());
         match self {
-            Rows::Controllers(rows) => v_flex().gap_px().children(rows.into_iter().enumerate().map(|(i, r)| {
-                row_base(
-                    ElementId::NamedChild(Arc::new(id.clone()), format!("c{i}").into()),
-                    r.selected,
-                    r.on_click,
-                    cx,
-                )
-                .child(
-                    h_flex()
-                        .gap_2p5()
-                        .child(Icon::new(gpui_kit::assets::IconName::Gamepad2).small())
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .child(div().text_sm().font_medium().child(r.name))
-                                .child(div().text_xs().text_color(muted).child(r.detail)),
-                        )
-                        .children(r.battery.map(|b| div().text_xs().text_color(muted).child(b))),
-                )
-                .into_any_element()
-            })),
-            Rows::Slots(rows) => {
-                v_flex().gap_px().children(rows.into_iter().map(|r| {
-                    let number_color = if r.selected { Colors::highlight() } else { muted };
-                    row_base(
-                        ElementId::NamedChild(Arc::new(id.clone()), format!("s{}", r.number).into()),
-                        r.selected,
-                        r.on_click,
-                        cx,
+            Rows::Controllers(rows) => v_flex()
+                .gap_px()
+                .children(rows.into_iter().enumerate().map(|(i, r)| {
+                    let battery = r.battery.map(|b| {
+                        let (icon, color, text) = battery_view(b, cx);
+                        let text = SharedString::from(text);
+                        div()
+                            .id(child_id(format!("bat{i}")))
+                            .text_color(color.unwrap_or(muted))
+                            .child(Icon::new(icon).small())
+                            .tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx))
+                    });
+                    row_base(child_id(format!("c{i}")), r.selected, r.on_click, cx).child(
+                        h_flex()
+                            .gap_2p5()
+                            .child(Icon::new(gpui_kit::assets::IconName::Gamepad2).small())
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .child(div().text_sm().font_medium().child(r.name))
+                                    .child(div().text_xs().text_color(muted).child(r.detail)),
+                            )
+                            .children(battery),
                     )
-                    .child(
+                }))
+                .into_any_element(),
+            Rows::Slots(rows) => v_flex()
+                .gap_px()
+                .children(rows.into_iter().map(|r| {
+                    let number_color = if r.selected { Colors::highlight() } else { muted };
+                    let activate = r.on_activate.map(|on_activate| {
+                        Button::new(child_id(format!("act{}", r.number)))
+                            .ghost()
+                            .xsmall()
+                            .label("Activate")
+                            .tooltip("Make the controller use this slot now")
+                            .on_click(move |e, w, cx| on_activate(e, w, cx))
+                    });
+                    row_base(child_id(format!("s{}", r.number)), r.selected, r.on_click, cx).child(
                         v_flex()
                             .gap_1p5()
                             .child(
                                 h_flex()
+                                    .h(px(20.))
                                     .gap_2p5()
                                     .text_sm()
                                     .child(
@@ -119,7 +160,8 @@ impl SidebarItem for Rows {
                                     .when(r.edited, |d| d.child(div().size(px(6.)).rounded_full().bg(Colors::edited())))
                                     .when(r.active, |d| {
                                         d.child(div().text_xs().font_semibold().text_color(muted).child("ACTIVE"))
-                                    }),
+                                    })
+                                    .children(activate),
                             )
                             .child(
                                 h_flex().ml(px(30.)).h(px(4.)).gap(px(2.)).children(
@@ -127,10 +169,35 @@ impl SidebarItem for Rows {
                                 ),
                             ),
                     )
-                    .into_any_element()
                 }))
-            }
+                .into_any_element(),
         }
+    }
+}
+
+impl SidebarItem for Group {
+    fn render(self, id: impl Into<ElementId>, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let id: ElementId = id.into();
+        let action = self.action.map(|(icon, tooltip, on_click)| {
+            Button::new(ElementId::NamedChild(Arc::new(id.clone()), "action".into()))
+                .icon(icon)
+                .ghost()
+                .xsmall()
+                .tooltip(tooltip)
+                .on_click(move |e, w, cx| on_click(e, w, cx))
+        });
+        v_flex()
+            .child(
+                h_flex()
+                    .h_8()
+                    .px_2()
+                    .justify_between()
+                    .text_xs()
+                    .text_color(cx.theme().sidebar_foreground.opacity(0.7))
+                    .child(self.label)
+                    .children(action),
+            )
+            .child(self.rows.render(&id, cx))
     }
 }
 
@@ -162,51 +229,70 @@ pub fn render(app: &FlugApp, cx: &mut Context<FlugApp>) -> impl IntoElement {
                 Connection::Dongle => "Dongle",
                 Connection::Cable => "Cable",
             };
-            let battery = e.loaded.as_ref().map(|l| match l.info.battery {
-                Battery::Level(n) => SharedString::from(format!("{n}/5")),
-                Battery::Charging => "Charging".into(),
-            });
             ControllerRow {
                 name: controller_name(&s.product).into(),
                 detail: format!("{connection} · {}", s.port).into(),
-                battery,
+                battery: e.loaded.as_ref().map(|l| l.info.battery),
                 selected: app.selected.as_ref() == Some(&s.port),
                 on_click: Rc::new(cx.listener(move |this, _, window, cx| this.go_controller(port.clone(), window, cx))),
             }
         })
         .collect();
-    let mut groups = vec![SidebarGroup::new("Controllers").child(Rows::Controllers(controllers))];
+    let refresh: Handler = Rc::new(cx.listener(|this, _, _, cx| this.refresh(cx)));
+    let mut groups = vec![Group {
+        label: "Controllers".into(),
+        action: Some((IconName::RefreshCw, "Look for controllers", refresh)),
+        rows: Rows::Controllers(controllers),
+    }];
     if let Some(loaded) = app.loaded() {
+        let busy = app.is_busy();
         let slot_row = |i: usize| {
             let d = loaded.slots.get(i)?;
             let number = u8::try_from(i).ok()?;
             let name = if d.config.name.trim().is_empty() { "Unnamed".to_owned() } else { d.config.name.clone() };
+            let active = loaded.active.slot.get() == number;
+            let on_activate: Option<Handler> = (i < 4 && !active && !busy).then(|| {
+                let h: Handler = Rc::new(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.request_activate(i, window, cx);
+                }));
+                h
+            });
             Some(SlotRow {
                 number,
                 name: name.into(),
                 leds: LED_ORDER.iter().map(|&p| hex_color(led_color(&d.led, 0, p))).collect(),
                 selected: app.slot == i,
-                active: loaded.active.slot.get() == number,
+                active,
                 edited: d.is_dirty(),
                 on_click: Rc::new(cx.listener(move |this, _, window, cx| this.go_slot(i, window, cx))),
+                on_activate,
             })
         };
-        groups.push(SidebarGroup::new("Slots").child(Rows::Slots((0..4).filter_map(slot_row).collect())));
-        groups.push(SidebarGroup::new("Switch mode").child(Rows::Slots((4..8).filter_map(slot_row).collect())));
+        groups.push(Group {
+            label: "Slots".into(),
+            action: None,
+            rows: Rows::Slots((0..4).filter_map(slot_row).collect()),
+        });
+        groups.push(Group {
+            label: "Switch mode slots".into(),
+            action: None,
+            rows: Rows::Slots((4..8).filter_map(slot_row).collect()),
+        });
     }
     Sidebar::new("sidebar")
         .collapsible(false)
         .w(px(250.))
         .header(
-            SidebarHeader::new().child(
-                h_flex().w_full().justify_between().child(div().font_bold().text_sm().child("Flugdiggi")).child(
-                    Button::new("refresh")
-                        .icon(IconName::RefreshCw)
-                        .ghost()
-                        .small()
-                        .tooltip("Look for controllers")
-                        .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
-                ),
+            div().id("sidebar-title").w_full().px_2().py_1().font_bold().text_sm().child("Flugdiggi").on_mouse_down(
+                MouseButton::Left,
+                |ev, window, _| {
+                    if ev.click_count >= 2 {
+                        window.zoom_window();
+                    } else {
+                        window.start_window_move();
+                    }
+                },
             ),
         )
         .children(groups)
