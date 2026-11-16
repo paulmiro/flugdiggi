@@ -1,6 +1,6 @@
 //! Editable slot data and the controller-specific tables the pages are built from.
 
-use flugdiggi_core::config::{Config, Macro, Turbo, is_parked_macro_button, parked_macro_button};
+use flugdiggi_core::config::{Config, Macro, Step, Turbo, is_parked_macro_button, parked_macro_button};
 use flugdiggi_core::led::{Led, Leds};
 
 /// Number of slots: 0-3 for `XInput` mode, 4-7 for Switch mode.
@@ -473,10 +473,88 @@ pub fn macro_steps_free(config: &Config, index: usize) -> usize {
     MACRO_BLOCK_BYTES.saturating_sub(used) / 4
 }
 
+/// Latest time a macro step can have (stored in units of 10 ms in 16 bits).
+const MAX_STEP_MS: u32 = 655_350;
+/// Wait the official app puts before a step added by hand.
+const DEFAULT_WAIT_MS: u32 = 100;
+/// Values the wait sliders snap to.
+pub const WAIT_SNAPS: [u32; 18] =
+    [0, 10, 20, 30, 50, 80, 100, 150, 200, 300, 500, 750, 1000, 1500, 2000, 3000, 5000, 8000];
+
+/// Index of the snap value closest to `ms`.
+pub fn nearest_snap(ms: u32) -> usize {
+    WAIT_SNAPS.iter().enumerate().min_by_key(|(_, s)| s.abs_diff(ms)).map_or(0, |(i, _)| i)
+}
+
+/// Each step's wait after the previous step; the first step's wait counts from the button press.
+pub fn step_waits(m: &Macro) -> Vec<u32> {
+    let mut prev = 0u32;
+    m.steps
+        .iter()
+        .map(|s| {
+            let wait = s.at_ms.saturating_sub(prev);
+            prev = s.at_ms;
+            wait
+        })
+        .collect()
+}
+
+/// Sets the steps' times from their waits, in list order.
+fn retime(m: &mut Macro, waits: &[u32]) {
+    let mut t = 0u32;
+    for (s, w) in m.steps.iter_mut().zip(waits) {
+        t = t.saturating_add(*w).min(MAX_STEP_MS);
+        s.at_ms = t;
+    }
+}
+
+/// Changes how long step `index` waits after the previous one; later steps move with it.
+pub fn set_step_wait(m: &mut Macro, index: usize, ms: u32) {
+    let mut waits = step_waits(m);
+    if let Some(w) = waits.get_mut(index) {
+        *w = ms.saturating_div(10).saturating_mul(10);
+    }
+    retime(m, &waits);
+}
+
+/// Moves step `from` to position `to`, keeping every step's wait.
+pub fn move_step(m: &mut Macro, from: usize, to: usize) {
+    if from >= m.steps.len() || from == to {
+        return;
+    }
+    let mut waits = step_waits(m);
+    let step = m.steps.remove(from);
+    let wait = waits.remove(from);
+    let to = to.min(m.steps.len());
+    m.steps.insert(to, step);
+    waits.insert(to, wait);
+    retime(m, &waits);
+}
+
+/// Removes step `index`; the steps after it keep their waits and so happen earlier.
+pub fn remove_step(m: &mut Macro, index: usize) {
+    if index >= m.steps.len() {
+        return;
+    }
+    let mut waits = step_waits(m);
+    m.steps.remove(index);
+    waits.remove(index);
+    retime(m, &waits);
+}
+
+/// Adds a step after the last one. After a button press it releases that button.
+pub fn add_step(m: &mut Macro) {
+    let at = m.steps.last().map_or(0, |s| s.at_ms).saturating_add(DEFAULT_WAIT_MS).min(MAX_STEP_MS);
+    let step = match m.steps.last() {
+        Some(last) if last.event == EVENT_PRESS => Step { at_ms: at, key: last.key.clone(), event: EVENT_RELEASE },
+        _ => Step { at_ms: at, key: "a".to_owned(), event: EVENT_PRESS },
+    };
+    m.steps.push(step);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flugdiggi_core::config::Step;
 
     fn blob() -> Vec<u8> {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../core/testdata");
@@ -601,5 +679,50 @@ mod tests {
         assert_eq!(macro_steps_free(&c, 4), 128);
         edit_macro(&mut c, 0, |m| m.steps.extend((0..10).map(|i| step(i * 10))));
         assert_eq!(macro_steps_free(&c, 0), 122);
+    }
+
+    fn timed(times: &[u32]) -> Macro {
+        Macro { button: "a".to_owned(), mode: 1, steps: times.iter().map(|t| step(*t)).collect() }
+    }
+
+    fn times(m: &Macro) -> Vec<u32> {
+        m.steps.iter().map(|s| s.at_ms).collect()
+    }
+
+    #[test]
+    fn waits_count_from_the_previous_step() {
+        let mut m = timed(&[0, 100, 150]);
+        assert_eq!(step_waits(&m), vec![0, 100, 50]);
+        set_step_wait(&mut m, 1, 200);
+        assert_eq!(times(&m), vec![0, 200, 250]);
+    }
+
+    #[test]
+    fn moving_a_step_keeps_its_wait() {
+        let mut m = timed(&[10, 110, 130]);
+        m.steps.iter_mut().zip(["x", "y", "z"]).for_each(|(s, k)| k.clone_into(&mut s.key));
+        move_step(&mut m, 2, 0);
+        assert_eq!(m.steps.iter().map(|s| s.key.as_str()).collect::<Vec<_>>(), ["z", "x", "y"]);
+        assert_eq!(step_waits(&m), vec![20, 10, 100]);
+    }
+
+    #[test]
+    fn removing_a_step_moves_the_later_ones_earlier() {
+        let mut m = timed(&[0, 100, 150]);
+        remove_step(&mut m, 1);
+        assert_eq!(times(&m), vec![0, 50]);
+    }
+
+    #[test]
+    fn a_step_after_a_press_releases_that_button() {
+        let mut m = timed(&[0]);
+        if let Some(s) = m.steps.first_mut() {
+            "x".clone_into(&mut s.key);
+        }
+        add_step(&mut m);
+        let last = m.steps.last().unwrap();
+        assert_eq!((last.at_ms, last.key.as_str(), last.event), (100, "x", EVENT_RELEASE));
+        add_step(&mut m);
+        assert_eq!(m.steps.last().map(|s| s.event), Some(EVENT_PRESS));
     }
 }

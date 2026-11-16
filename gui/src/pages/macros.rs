@@ -3,19 +3,40 @@ use flugdiggi_core::config::{Macro, Step};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
-use gpui_kit::component::{ActiveTheme, IconName, Sizable, h_flex, v_flex};
+use gpui_kit::component::slider::Slider;
+use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, h_flex, v_flex};
 use gpui_kit::*;
 
 use crate::app::FlugApp;
 use crate::model::{
     self, BUTTONS, EVENT_LEFT_STICK, EVENT_PRESS, EVENT_RELEASE, EVENT_RIGHT_STICK, MAX_MACROS, STICK_DIRECTIONS,
-    TARGETS, key_label, macro_button, macro_steps_free,
+    TARGETS, WAIT_SNAPS, key_label, macro_button, macro_steps_free,
 };
 use crate::theme::Colors;
 use crate::widgets::{byte, card, heading, note, row, segmented, slider_row};
 
 const MODES: [&str; 3] = ["Once", "Repeat while held", "Toggle repeat"];
 const ACTIONS: [&str; 4] = ["Press", "Release", "Left stick", "Right stick"];
+
+/// A step being dragged by its handle.
+#[derive(Clone)]
+struct DraggedStep {
+    index: usize,
+    label: SharedString,
+}
+
+impl Render for DraggedStep {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_3()
+            .py_1p5()
+            .rounded(cx.theme().radius)
+            .bg(cx.theme().secondary)
+            .text_sm()
+            .shadow_md()
+            .child(self.label.clone())
+    }
+}
 
 fn action_index(event: u8) -> usize {
     match event {
@@ -222,22 +243,33 @@ impl FlugApp {
                     .child(format!("{end} ms")),
             );
 
+        let waits = model::step_waits(&m);
         let mut step_rows = Vec::new();
         for (i, s) in m.steps.iter().enumerate() {
-            let at = self.input(
-                format!("step-at-{sel}-{i}"),
-                &s.at_ms.to_string(),
+            let wait = waits.get(i).copied().unwrap_or(0);
+            let wait_input = self.input(
+                format!("step-wait-{sel}-{i}"),
+                &wait.to_string(),
                 move |a, text| {
                     if let Ok(ms) = text.trim().parse::<u32>() {
-                        let ms = ms.min(655_350).saturating_div(10).saturating_mul(10);
                         a.edit_silent(|d| {
-                            model::edit_macro(&mut d.config, sel, |m| {
-                                if let Some(step) = m.steps.get_mut(i) {
-                                    step.at_ms = ms;
-                                }
-                            });
+                            model::edit_macro(&mut d.config, sel, |m| model::set_step_wait(m, i, ms));
                         });
                     }
+                },
+                window,
+                cx,
+            );
+            let snaps = WAIT_SNAPS.len().saturating_sub(1);
+            let wait_slider = self.slider(
+                format!("step-wait-slider-{sel}-{i}"),
+                (0.0, f32::from(u8::try_from(snaps).unwrap_or(0))),
+                f32::from(u8::try_from(model::nearest_snap(wait)).unwrap_or(0)),
+                move |a, v| {
+                    let ms = WAIT_SNAPS.get(usize::from(byte(v))).copied().unwrap_or(0);
+                    a.edit_silent(|d| {
+                        model::edit_macro(&mut d.config, sel, |m| model::set_step_wait(m, i, ms));
+                    });
                 },
                 window,
                 cx,
@@ -288,21 +320,52 @@ impl FlugApp {
                     .ok();
                 }
             });
+            let label =
+                format!("{} {}", ACTIONS.get(action_index(s.event)).copied().unwrap_or_default(), key_label(&s.key));
             step_rows.push(
                 h_flex()
-                    .min_h(px(40.))
-                    .px_3()
+                    .id(("step", i))
+                    .px_2()
+                    .py_2()
                     .gap_2()
                     .when(i > 0, |r| r.border_t_1().border_color(Colors::line()))
+                    .drag_over::<DraggedStep>(|style, _, _, cx| style.bg(cx.theme().secondary))
+                    .on_drop(cx.listener(move |a, dragged: &DraggedStep, _, cx| {
+                        let from = dragged.index;
+                        a.edit_macro(cx, sel, |m| model::move_step(m, from, i));
+                    }))
                     .child(
-                        h_flex()
-                            .w(px(110.))
-                            .gap_1()
-                            .child(Input::new(&at).small())
-                            .child(div().text_xs().text_color(muted).child("ms")),
+                        div()
+                            .id(("grip", i))
+                            .p_1()
+                            .cursor_grab()
+                            .text_color(muted)
+                            .child(Icon::new(gpui_kit::assets::IconName::GripVertical).small())
+                            .on_drag(DraggedStep { index: i, label: label.into() }, |d, _, _, cx| {
+                                cx.new(|_| d.clone())
+                            }),
                     )
-                    .child(key_menu)
-                    .child(div().flex_1().child(action))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1p5()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(div().w(px(36.)).text_xs().text_color(muted).child("Wait"))
+                                    .child(div().w(px(72.)).child(Input::new(&wait_input).small()))
+                                    .child(div().text_xs().text_color(muted).child("ms"))
+                                    .child(div().flex_1().min_w(px(80.)).px_2().child(Slider::new(&wait_slider))),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(div().w(px(36.)).text_xs().text_color(muted).child("Then"))
+                                    .child(action)
+                                    .child(key_menu),
+                            ),
+                    )
                     .child(
                         Button::new(("rm-step", i))
                             .ghost()
@@ -310,16 +373,11 @@ impl FlugApp {
                             .icon(IconName::Close)
                             .tooltip("Remove step")
                             .on_click(cx.listener(move |a, _, _, cx| {
-                                a.edit_macro(cx, sel, |m| {
-                                    if i < m.steps.len() {
-                                        m.steps.remove(i);
-                                    }
-                                });
+                                a.edit_macro(cx, sel, |m| model::remove_step(m, i));
                             })),
                     ),
             );
         }
-        let last_at = m.steps.iter().map(|s| s.at_ms).max();
         let clearable = !m.steps.is_empty() || applied.is_some();
 
         let right = v_flex()
@@ -370,18 +428,13 @@ impl FlugApp {
                         .icon(IconName::Plus)
                         .label("Add step")
                         .disabled(free == 0)
-                        .on_click(cx.listener(move |a, _, _, cx| {
-                            let at = last_at.map_or(0, |t| t.saturating_add(40));
-                            a.edit_macro(cx, sel, |m| {
-                                m.steps.push(Step { at_ms: at, key: "a".to_owned(), event: EVENT_PRESS });
-                            });
-                        })),
+                        .on_click(cx.listener(move |a, _, _, cx| a.edit_macro(cx, sel, model::add_step))),
                 ),
             )
             .when(!step_rows.is_empty(), |r| r.child(card(cx).children(step_rows)))
             .child(note(
                 format!(
-                    "Times count from the button press, in steps of 10 ms. Stick steps hold the stick until the next step for that stick. All macros share space for {free} more steps."
+                    "Each step waits the given time after the previous one (the first after the button press), in steps of 10 ms. Drag a step by its handle to move it. Stick steps hold the stick until the next step for that stick. All macros share space for {free} more steps."
                 ),
                 cx,
             ));
