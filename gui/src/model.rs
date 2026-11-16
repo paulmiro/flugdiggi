@@ -17,11 +17,11 @@ const MACRO_HEADER_BYTES: usize = 6;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Buttons,
+    Macros,
     Sticks,
     Triggers,
     Leds,
     Motion,
-    Macros,
     Vibration,
     Settings,
 }
@@ -29,11 +29,11 @@ pub enum Page {
 impl Page {
     pub const ALL: [Page; 8] = [
         Page::Buttons,
+        Page::Macros,
         Page::Sticks,
         Page::Triggers,
         Page::Leds,
         Page::Motion,
-        Page::Macros,
         Page::Vibration,
         Page::Settings,
     ];
