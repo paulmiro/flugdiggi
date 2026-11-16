@@ -49,9 +49,21 @@ pub fn slider_row(
     disabled: bool,
     cx: &App,
 ) -> Div {
+    slider_row_sub(label, None, state, value, disabled, cx)
+}
+
+/// Like [`slider_row`], with an explanation under the label.
+pub fn slider_row_sub(
+    label: impl Into<SharedString>,
+    sub: Option<&str>,
+    state: &Entity<SliderState>,
+    value: impl Into<SharedString>,
+    disabled: bool,
+    cx: &App,
+) -> Div {
     row(
         label,
-        None,
+        sub,
         h_flex().gap_3().child(div().w(px(170.)).child(Slider::new(state).disabled(disabled))).child(
             div()
                 .w(px(64.))

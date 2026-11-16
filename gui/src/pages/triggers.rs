@@ -5,19 +5,10 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable, h_flex, v_flex};
 use gpui_kit::*;
 
-use super::curve::{CURVE_KINDS, chart};
+use super::curve::{self, TRIGGER_MAX, chart};
 use crate::app::FlugApp;
-use crate::model::SlotData;
-use crate::widgets::{byte, card, columns, edited_dot, percent, segmented, slider_row};
-
-/// Raw maximum of trigger curve values.
-const TRIGGER_MAX: u8 = 255;
-
-#[derive(Clone, Copy)]
-enum Side {
-    Left,
-    Right,
-}
+use crate::model::{Side, SlotData};
+use crate::widgets::{byte, card, columns, edited_dot, percent, slider_row_sub};
 
 fn trigger(d: &mut SlotData, side: Side) -> &mut Curve {
     match side {
@@ -26,18 +17,21 @@ fn trigger(d: &mut SlotData, side: Side) -> &mut Curve {
     }
 }
 
-fn edit_trigger(app: &mut FlugApp, side: Side, f: impl Fn(&mut Curve)) {
-    let linked = app.link_triggers;
+fn name(side: Side) -> &'static str {
+    match side {
+        Side::Left => "left",
+        Side::Right => "right",
+    }
+}
+
+/// Applies `f` to the trigger, and copies the result to the other trigger while it is being copied there.
+fn edit_trigger(app: &mut FlugApp, side: Side, f: impl FnOnce(&mut Curve)) {
+    let copy = app.trigger_copy == Some(side);
     app.edit_silent(|d| {
         f(trigger(d, side));
-        if linked {
-            f(trigger(
-                d,
-                match side {
-                    Side::Left => Side::Right,
-                    Side::Right => Side::Left,
-                },
-            ));
+        if copy {
+            let c = trigger(d, side).clone();
+            *trigger(d, side.other()) = c;
         }
     });
 }
@@ -52,58 +46,70 @@ impl FlugApp {
             Side::Left => "lt",
             Side::Right => "rt",
         };
-        let id = match side {
-            Side::Left => 0usize,
-            Side::Right => 1,
-        };
         let mut slider = |app: &mut FlugApp, key: &str, value: u8, f: fn(&mut Curve, u8)| {
             app.slider(
                 format!("{n}-{key}"),
-                (0.0, 255.0),
+                (0.0, f32::from(TRIGGER_MAX)),
                 f32::from(value),
-                move |a, v| {
-                    edit_trigger(a, side, |c| f(c, byte(v)));
-                },
+                move |a, v| edit_trigger(a, side, |c| f(c, byte(v))),
                 window,
                 cx,
             )
         };
-        let start = slider(self, "start", c.start, |c, v| c.start = v);
-        let end = slider(self, "end", c.end, |c, v| c.end = v);
-        let p1x = slider(self, "p1x", c.point1[0], |c, v| c.point1[0] = v);
-        let p1y = slider(self, "p1y", c.point1[1], |c, v| c.point1[1] = v);
-        let p2x = slider(self, "p2x", c.point2[0], |c, v| c.point2[0] = v);
-        let p2y = slider(self, "p2y", c.point2[1], |c, v| c.point2[1] = v);
+        let start = slider(self, "start", c.start, curve::set_trigger_start);
+        let end = slider(self, "end", c.end, curve::set_trigger_end);
         let edited = c != saved;
-        let kind = usize::from(c.kind).min(3);
+        let copying = self.trigger_copy == Some(side);
+        let copied_here = self.trigger_copy == Some(side.other());
+        let busy = self.is_busy();
         let saved_curve = saved.clone();
         let title = match side {
             Side::Left => "Left trigger",
             Side::Right => "Right trigger",
         };
-        card(cx)
+        let header = h_flex()
+            .px_3()
+            .pt_2p5()
+            .gap_2()
+            .child(div().text_sm().font_bold().child(title))
+            .when(edited, |h| h.child(edited_dot()))
+            .child(div().flex_1())
             .child(
-                h_flex()
-                    .px_3()
-                    .pt_2p5()
-                    .gap_2()
-                    .child(div().text_sm().font_bold().child(title))
-                    .when(edited, |h| h.child(edited_dot()))
-                    .child(div().flex_1())
-                    .child(
-                        Button::new(("reset-trigger", id))
-                            .ghost()
-                            .small()
-                            .icon(Icon::new(gpui_kit::assets::IconName::RotateCcw))
-                            .tooltip("Undo changes to this trigger")
-                            .disabled(!edited)
-                            .on_click(cx.listener(move |app, _, _, cx| {
-                                let saved = saved_curve.clone();
-                                app.edit(cx, |d| *trigger(d, side) = saved);
-                            })),
-                    ),
+                Switch::new(("copy-trigger", side.index()))
+                    .small()
+                    .label(format!("Copy to {} trigger", name(side.other())))
+                    .checked(copying)
+                    .disabled(busy)
+                    .on_click(cx.listener(move |a, on: &bool, _, cx| {
+                        if *on {
+                            a.trigger_copy = Some(side);
+                            a.edit(cx, |d| {
+                                let c = trigger(d, side).clone();
+                                *trigger(d, side.other()) = c;
+                            });
+                        } else {
+                            a.trigger_copy = None;
+                            cx.notify();
+                        }
+                    })),
             )
-            .child(div().p_3().child(chart(c, TRIGGER_MAX, edited)))
+            .child(
+                Button::new(("reset-trigger", side.index()))
+                    .ghost()
+                    .small()
+                    .icon(Icon::new(gpui_kit::assets::IconName::RotateCcw))
+                    .tooltip("Undo changes to this trigger")
+                    .disabled(!edited || copied_here)
+                    .on_click(cx.listener(move |a, _, _, cx| {
+                        let saved = saved_curve.clone();
+                        edit_trigger(a, side, |c| *c = saved);
+                        cx.notify();
+                    })),
+            );
+        let body = v_flex()
+            .relative()
+            .when(copied_here, |b| b.opacity(0.4))
+            .child(div().p_3().child(chart(curve::trigger_points(c), curve::trigger_active(c), edited)))
             .child(
                 h_flex()
                     .px_3()
@@ -114,56 +120,30 @@ impl FlugApp {
                     .child("Released")
                     .child("Fully pressed"),
             )
-            .child(
-                div().px_3().pb_3().child(
-                    segmented(("trigger-kind", id), &CURVE_KINDS, Some(kind), {
-                        let this = cx.entity().downgrade();
-                        move |k, _, cx| {
-                            this.update(cx, |a, cx| {
-                                edit_trigger(a, side, |c| c.kind = u8::try_from(k).unwrap_or(0));
-                                cx.notify();
-                            })
-                            .ok();
-                        }
-                    })
-                    .w_full(),
-                ),
-            )
-            .child(slider_row("Start", &start, percent(c.start, TRIGGER_MAX), false, cx))
-            .child(slider_row("End", &end, percent(c.end, TRIGGER_MAX), false, cx))
-            .when(kind == 3, |card| {
-                card.child(slider_row("Point 1 input", &p1x, percent(c.point1[0], TRIGGER_MAX), false, cx))
-                    .child(slider_row("Point 1 output", &p1y, percent(c.point1[1], TRIGGER_MAX), false, cx))
-                    .child(slider_row("Point 2 input", &p2x, percent(c.point2[0], TRIGGER_MAX), false, cx))
-                    .child(slider_row("Point 2 output", &p2y, percent(c.point2[1], TRIGGER_MAX), false, cx))
-            })
-            .into_any_element()
+            .child(slider_row_sub(
+                "Start",
+                Some("Travel at the start that is ignored"),
+                &start,
+                percent(c.start, TRIGGER_MAX),
+                false,
+                cx,
+            ))
+            .child(slider_row_sub(
+                "End",
+                Some("Pressing this far already counts as fully pressed"),
+                &end,
+                percent(c.end, TRIGGER_MAX),
+                false,
+                cx,
+            ))
+            .when(copied_here, |b| b.child(div().absolute().top_0().left_0().size_full().occlude()));
+        card(cx).child(header).child(body).into_any_element()
     }
 
     pub fn render_triggers(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(d) = self.current().cloned() else { return div().into_any_element() };
         let left = self.trigger_card(&d, Side::Left, window, cx);
         let right = self.trigger_card(&d, Side::Right, window, cx);
-        v_flex()
-            .gap_3()
-            .child(
-                h_flex()
-                    .gap_3()
-                    .text_sm()
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Start and end set how much of the trigger's travel is ignored at each end."),
-                    )
-                    .child(Switch::new("link-triggers").label("Link triggers").checked(self.link_triggers).on_click(
-                        cx.listener(|a, v: &bool, _, cx| {
-                            a.link_triggers = *v;
-                            cx.notify();
-                        }),
-                    )),
-            )
-            .child(columns(left, right))
-            .into_any_element()
+        columns(left, right).into_any_element()
     }
 }

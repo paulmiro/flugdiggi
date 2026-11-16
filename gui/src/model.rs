@@ -14,6 +14,29 @@ const DEFAULT_PAUSE_MS: u16 = 30;
 const MACRO_BLOCK_BYTES: usize = 538;
 const MACRO_HEADER_BYTES: usize = 6;
 
+/// Left or right stick or trigger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
+}
+
+impl Side {
+    pub fn other(self) -> Side {
+        match self {
+            Side::Left => Side::Right,
+            Side::Right => Side::Left,
+        }
+    }
+
+    pub fn index(self) -> usize {
+        match self {
+            Side::Left => 0,
+            Side::Right => 1,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Buttons,

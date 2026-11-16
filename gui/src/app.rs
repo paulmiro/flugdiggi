@@ -23,7 +23,7 @@ use gpui_kit::*;
 use tracing::{error, info, warn};
 
 use crate::device::{self, Loaded};
-use crate::model::{LedPos, Page, SLOTS, SlotData};
+use crate::model::{LedPos, Page, SLOTS, Side, SlotData};
 use crate::sidebar;
 use crate::theme::Colors;
 
@@ -65,8 +65,9 @@ pub struct FlugApp {
     after_save: Option<Nav>,
     sliders: HashMap<SharedString, Bound<SliderState>>,
     inputs: HashMap<SharedString, Bound<InputState>>,
-    pub link_sticks: bool,
-    pub link_triggers: bool,
+    /// Stick whose settings are copied to the other one, if any.
+    pub stick_copy: Option<Side>,
+    pub trigger_copy: Option<Side>,
     /// LED cell whose colour picker is open.
     pub picker: Option<(usize, LedPos)>,
     pub macro_sel: usize,
@@ -114,8 +115,8 @@ impl FlugApp {
             after_save: None,
             sliders: HashMap::new(),
             inputs: HashMap::new(),
-            link_sticks: false,
-            link_triggers: false,
+            stick_copy: None,
+            trigger_copy: None,
             picker: None,
             macro_sel: 0,
             led_frame: 0,
@@ -280,6 +281,7 @@ impl FlugApp {
             move || device::load(&port, &p),
             |this, r, cx| match r {
                 Ok(loaded) => {
+                    this.stop_copying();
                     let active = usize::from(loaded.active.slot.get());
                     if let Some(e) = this.entry_mut() {
                         e.loaded = Some(loaded);
@@ -329,6 +331,7 @@ impl FlugApp {
 
     pub fn discard(&mut self, cx: &mut Context<Self>) {
         self.picker = None;
+        self.stop_copying();
         self.edit(cx, SlotData::discard);
     }
 
@@ -408,6 +411,7 @@ impl FlugApp {
 
     fn apply_nav(&mut self, nav: Nav, cx: &mut Context<Self>) {
         self.picker = None;
+        self.stop_copying();
         match nav {
             Nav::Slot(s) => self.slot = s,
             Nav::Controller(port) => self.select_controller(port, cx),
@@ -426,6 +430,12 @@ impl FlugApp {
         if self.selected.as_ref() != Some(&port) {
             self.navigate(Nav::Controller(port), window, cx);
         }
+    }
+
+    /// Ends copying one stick or trigger to the other, e.g. when other values are loaded.
+    pub fn stop_copying(&mut self) {
+        self.stick_copy = None;
+        self.trigger_copy = None;
     }
 
     pub fn advanced_open(&self, key: &str) -> bool {
@@ -552,16 +562,19 @@ impl FlugApp {
             let Some(path) = paths.into_iter().next() else { return };
             let file = device::import(&path);
             this.update(cx, |this, cx| match file {
-                Ok(f) => this.edit(cx, |d| {
-                    if let Some(mut c) = f.config {
-                        c.proto_version = d.config.proto_version;
-                        c.data_version = d.config.data_version;
-                        d.config = c;
-                    }
-                    if let Some(l) = f.led {
-                        d.led = l;
-                    }
-                }),
+                Ok(f) => {
+                    this.stop_copying();
+                    this.edit(cx, |d| {
+                        if let Some(mut c) = f.config {
+                            c.proto_version = d.config.proto_version;
+                            c.data_version = d.config.data_version;
+                            d.config = c;
+                        }
+                        if let Some(l) = f.led {
+                            d.led = l;
+                        }
+                    });
+                }
                 Err(e) => this.show_error("Import failed", &e, cx),
             })
             .ok();
