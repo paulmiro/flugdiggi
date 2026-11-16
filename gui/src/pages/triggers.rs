@@ -144,6 +144,6 @@ impl FlugApp {
         let Some(d) = self.current().cloned() else { return div().into_any_element() };
         let left = self.trigger_card(&d, Side::Left, window, cx);
         let right = self.trigger_card(&d, Side::Right, window, cx);
-        columns(left, right).into_any_element()
+        columns(left, right, self.narrow).into_any_element()
     }
 }

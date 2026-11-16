@@ -81,10 +81,17 @@ pub struct FlugApp {
     /// Whether a play-once animation has reached its end.
     pub led_anim_done: bool,
     advanced: std::collections::HashSet<String>,
+    /// Too narrow for two columns of settings side by side.
+    pub narrow: bool,
+    /// Room in the header for the unsaved-changes text next to the tabs.
+    wide_header: bool,
     _poll: Task<()>,
 }
 
 const POLL: Duration = Duration::from_secs(3);
+/// Window widths from which pages show two columns, and the header shows the unsaved-changes text.
+const TWO_COLUMNS_WIDTH: f32 = 1140.;
+const STATUS_WIDTH: f32 = 1300.;
 
 impl FlugApp {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -129,6 +136,8 @@ impl FlugApp {
             led_anim: None,
             led_anim_done: false,
             advanced: std::collections::HashSet::new(),
+            narrow: false,
+            wide_header: true,
             _poll: poll,
         }
     }
@@ -602,6 +611,7 @@ impl FlugApp {
         let busy = self.busy.as_ref().map(|b| b.label.clone());
         let selected = Page::ALL.iter().position(|p| *p == self.page).unwrap_or(0);
         let has_data = self.current().is_some();
+        let show_status = self.wide_header || busy.is_some();
         let this = cx.entity().downgrade();
         let status = match (&busy, changes) {
             (Some(label), _) => h_flex().gap_2().child(Spinner::new().small()).child(label.clone()).into_any_element(),
@@ -631,26 +641,32 @@ impl FlugApp {
                     .gap_2()
                     .when(has_data, |d| {
                         d.child(
-                            TabBar::new("pages")
-                                .pill()
-                                .small()
-                                .selected_index(selected)
-                                .children(Page::ALL.iter().map(|p| Tab::new().label(p.label())))
-                                .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                                    if let Some(p) = Page::ALL.get(*ix) {
-                                        this.page = *p;
-                                        this.picker = None;
-                                        cx.notify();
-                                    }
-                                })),
+                            div().flex_1().min_w_0().child(
+                                TabBar::new("pages")
+                                    .pill()
+                                    .small()
+                                    .menu(true)
+                                    .selected_index(selected)
+                                    .children(Page::ALL.iter().map(|p| Tab::new().label(p.label())))
+                                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                                        if let Some(p) = Page::ALL.get(*ix) {
+                                            this.page = *p;
+                                            this.picker = None;
+                                            cx.notify();
+                                        }
+                                    })),
+                            ),
                         )
                     })
-                    .child(div().flex_1())
-                    .child(div().text_sm().text_color(cx.theme().muted_foreground).child(status))
+                    .when(!has_data, |d| d.child(div().flex_1()))
+                    .when(show_status, |d| {
+                        d.child(div().flex_shrink_0().text_sm().text_color(cx.theme().muted_foreground).child(status))
+                    })
                     .when(has_data, |d| {
                         d.child(
                             Button::new("discard")
                                 .label("Discard")
+                                .flex_shrink_0()
                                 .small()
                                 .disabled(changes == 0 || busy.is_some())
                                 .on_click(cx.listener(|this, _, _, cx| this.discard(cx))),
@@ -658,6 +674,7 @@ impl FlugApp {
                         .child(
                             Button::new("save")
                                 .label("Save")
+                                .flex_shrink_0()
                                 .primary()
                                 .small()
                                 .disabled(changes == 0 || busy.is_some())
@@ -768,6 +785,9 @@ fn open_quit_dialog(window: &mut Window, cx: &mut App) {
 
 impl Render for FlugApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let width = window.viewport_size().width;
+        self.narrow = width < px(TWO_COLUMNS_WIDTH);
+        self.wide_header = width >= px(STATUS_WIDTH);
         let error = self.error.clone();
         h_flex()
             .size_full()

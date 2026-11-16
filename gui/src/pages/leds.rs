@@ -381,13 +381,13 @@ impl FlugApp {
             |(f, p)| format!("Frame {}, {} LED", f.saturating_add(1), pos_name(p)),
         );
 
-        h_flex()
-            .items_start()
+        let narrow = self.narrow;
+        let layout = if narrow { v_flex() } else { h_flex().items_start() };
+        layout
             .gap_4()
             .child(
                 v_flex()
-                    .w(px(440.))
-                    .flex_shrink_0()
+                    .when(!narrow, |l| l.w(px(440.)).flex_shrink_0())
                     .gap_2()
                     .child(h_flex().justify_between().child(heading("Frames")).child(frame_buttons))
                     .child(card(cx).p_3().child(grid))

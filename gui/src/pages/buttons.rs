@@ -12,7 +12,7 @@ use crate::model::{
     self, BUTTONS, MAX_MACROS, Page, TARGETS, is_extra, key_label, macro_button, macro_on_button, turbo_of,
 };
 use crate::theme::Colors;
-use crate::widgets::{byte, card, edited_dot, segmented};
+use crate::widgets::{byte, card, columns, edited_dot, segmented};
 
 const TURBO_MODES: [&str; 3] = ["off", "hold", "toggle"];
 
@@ -281,6 +281,6 @@ impl FlugApp {
                 .child(card(cx).children(rows))
         };
         second.truncate(11);
-        h_flex().items_start().gap_4().child(column(rows, cx)).child(column(second, cx)).into_any_element()
+        columns(column(rows, cx), column(second, cx), self.narrow).into_any_element()
     }
 }

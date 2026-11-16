@@ -106,6 +106,6 @@ impl FlugApp {
             .gap_2()
             .child(heading("Trigger vibration"))
             .child(note("The Vader 4 Pro has no motors in its triggers, so there is nothing to set here.", cx));
-        columns(rumble, info).into_any_element()
+        columns(rumble, info, self.narrow).into_any_element()
     }
 }

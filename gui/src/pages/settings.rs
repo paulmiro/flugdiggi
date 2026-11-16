@@ -121,7 +121,7 @@ impl FlugApp {
                 .child(info_row("Battery", i.battery.to_string(), false, cx))
                 .child(info_row("Data version", format!("{:04x}", d.saved_config.data_version), true, cx)),
         );
-        columns(left, right).into_any_element()
+        columns(left, right, self.narrow).into_any_element()
     }
 
     /// Shown until the controller's data is loaded: only what can be read without detaching xpad.
@@ -160,6 +160,6 @@ impl FlugApp {
                 .child(info_row("Connection", connection, false, cx))
                 .child(info_row("USB port", s.port.to_string(), true, cx)),
         );
-        columns(left, right).into_any_element()
+        columns(left, right, self.narrow).into_any_element()
     }
 }

@@ -176,6 +176,6 @@ impl FlugApp {
                     ),
             )
             .child(note("Gyro values are the controller's raw units.", cx));
-        columns(left, right).into_any_element()
+        columns(left, right, self.narrow).into_any_element()
     }
 }

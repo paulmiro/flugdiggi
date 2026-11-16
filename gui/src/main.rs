@@ -62,10 +62,17 @@ fn main() {
     gpui_kit::application().with_assets(AppAssets).run(|cx| {
         gpui_kit::init(cx);
         theme::init(cx);
-        let bounds = Bounds::centered(None, size(px(1200.), px(780.)), cx);
+        // Small enough for half a screen; both sizes shrink further on small displays.
+        let (mut preferred, mut min) = (size(px(1200.), px(780.)), size(px(720.), px(520.)));
+        if let Some(display) = cx.primary_display() {
+            let area = display.visible_bounds().size;
+            preferred = preferred.min(&area);
+            min = min.min(&preferred);
+        }
+        let bounds = Bounds::centered(None, preferred, cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(980.), px(600.))),
+            window_min_size: Some(min),
             app_id: Some("flugdiggi".into()),
             ..TitleBar::window_options()
         };

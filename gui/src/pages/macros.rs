@@ -141,9 +141,9 @@ impl FlugApp {
                         .child(div().text_xs().text_color(muted).child(format!("{applied} · {}", steps_text(&m)))),
                 )
         });
+        let narrow = self.narrow;
         let left = v_flex()
-            .w(px(260.))
-            .flex_shrink_0()
+            .when(!narrow, |l| l.w(px(260.)).flex_shrink_0())
             .gap_2()
             .child(heading("Macros"))
             .child(card(cx).p_1().children(items))
@@ -361,6 +361,7 @@ impl FlugApp {
                             .child(
                                 h_flex()
                                     .gap_2()
+                                    .flex_wrap()
                                     .child(div().w(px(36.)).text_xs().text_color(muted).child("Then"))
                                     .child(action)
                                     .child(key_menu),
@@ -439,6 +440,7 @@ impl FlugApp {
                 cx,
             ));
 
-        h_flex().items_start().gap_4().child(left).child(right).into_any_element()
+        let layout = if narrow { v_flex() } else { h_flex().items_start() };
+        layout.gap_4().child(left).child(right).into_any_element()
     }
 }

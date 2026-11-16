@@ -35,10 +35,11 @@ pub fn row(label: impl Into<SharedString>, sub: Option<&str>, control: impl Into
         .child(
             v_flex()
                 .flex_1()
+                .min_w_0()
                 .child(label.into())
                 .children(sub.map(|s| div().text_xs().text_color(cx.theme().muted_foreground).child(s.to_owned()))),
         )
-        .child(control)
+        .child(div().flex_shrink_0().child(control))
 }
 
 /// A slider with its value shown to the right.
@@ -101,8 +102,11 @@ pub fn note(text: impl Into<SharedString>, cx: &App) -> Div {
     div().px_0p5().text_xs().text_color(cx.theme().muted_foreground).child(text.into())
 }
 
-/// Two columns of equal width.
-pub fn columns(left: impl IntoElement, right: impl IntoElement) -> Div {
+/// Two columns of equal width, or one below the other when `narrow`.
+pub fn columns(left: impl IntoElement, right: impl IntoElement, narrow: bool) -> Div {
+    if narrow {
+        return v_flex().w_full().gap_4().child(left).child(right);
+    }
     h_flex()
         .w_full()
         .items_start()
