@@ -21,7 +21,19 @@ use tracing_subscriber::EnvFilter;
 
 gpui_kit::assets::icon_assets!(
     ExtraIcons,
-    [Battery, BatteryCharging, BatteryFull, BatteryLow, BatteryMedium, Gamepad2, GripVertical, Pencil, RotateCcw]
+    [
+        Battery,
+        BatteryCharging,
+        BatteryFull,
+        BatteryLow,
+        BatteryMedium,
+        Gamepad2,
+        GripVertical,
+        Pause,
+        Pencil,
+        Play,
+        RotateCcw
+    ]
 );
 
 struct AppAssets;

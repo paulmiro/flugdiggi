@@ -1,18 +1,20 @@
+use std::time::{Duration, Instant};
+
 use crate::prelude::*;
+use flugdiggi_core::led::Led;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::collapsible::Collapsible as CollapsibleView;
-use gpui_kit::component::input::Input;
+use gpui_kit::component::color_picker::{ColorPickerEvent, ColorPickerState, ColorSelect};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
-use gpui_kit::component::popover::Popover;
-use gpui_kit::component::slider::Slider;
-use gpui_kit::component::{ActiveTheme, IconName, Sizable, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, h_flex, v_flex};
 use gpui_kit::*;
 
 use crate::app::FlugApp;
 use crate::model::{
-    self, FRAMES, LED_ORDER, LedPos, PRESETS, frame_count, hsv_to_rgb, led_color, parse_hex, preset_name, rgb_to_hsv,
-    set_led_color,
+    self, FRAMES, LED_ORDER, LedPos, PRESETS, Page, frame_count, led_color, parse_hex, preset_name, set_led_color,
+    unit_to_u8,
 };
+use crate::theme::Colors;
 use crate::widgets::{byte, card, heading, row, segmented, slider_row, subheading};
 
 pub fn hex_hsla(s: &str) -> Hsla {
@@ -20,13 +22,24 @@ pub fn hex_hsla(s: &str) -> Hsla {
     rgb(u32::from_be_bytes([0, r, g, b])).into()
 }
 
-fn hsv_hex((h, s, v): (f32, f32, f32)) -> String {
-    let (r, g, b) = hsv_to_rgb(h, s, v);
+fn hsla_hex(c: Hsla) -> String {
+    let c = Rgba::from(c);
+    let [r, g, b] = [c.r, c.g, c.b].map(|v| unit_to_u8(v * 255.0));
     format!("#{r:02x}{g:02x}{b:02x}")
 }
 
+fn pos_name(pos: LedPos) -> &'static str {
+    match pos {
+        LedPos::TopLeft => "top left",
+        LedPos::MiddleLeft => "middle left",
+        LedPos::Bottom => "bottom",
+        LedPos::MiddleRight => "middle right",
+        LedPos::TopRight => "top right",
+    }
+}
+
 /// Inserts a copy of `frame` after it; the last stored frame drops off.
-fn duplicate_frame(led: &mut flugdiggi_core::led::Led, frame: usize) {
+fn duplicate_frame(led: &mut Led, frame: usize) {
     for pos in LED_ORDER {
         let steps = model::led_steps_mut(&mut led.leds, pos);
         if let Some(c) = steps.get(frame).cloned() {
@@ -36,7 +49,7 @@ fn duplicate_frame(led: &mut flugdiggi_core::led::Led, frame: usize) {
     }
 }
 
-fn remove_frame(led: &mut flugdiggi_core::led::Led, frame: usize) {
+fn remove_frame(led: &mut Led, frame: usize) {
     for pos in LED_ORDER {
         let steps = model::led_steps_mut(&mut led.leds, pos);
         if frame < steps.len() {
@@ -46,69 +59,94 @@ fn remove_frame(led: &mut flugdiggi_core::led::Led, frame: usize) {
     }
 }
 
-/// A colour cell of the frame grid; opens the colour picker.
-#[derive(IntoElement)]
-struct Cell {
-    id: ElementId,
-    color: Hsla,
-    selected: bool,
+/// A colour tile being dragged onto another.
+#[derive(Clone)]
+struct DraggedColor {
+    color: String,
 }
 
-impl gpui_kit::component::Selectable for Cell {
-    fn selected(mut self, selected: bool) -> Self {
-        self.selected = selected;
-        self
-    }
-
-    fn is_selected(&self) -> bool {
-        self.selected
+impl Render for DraggedColor {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size(px(28.)).rounded(px(6.)).border_2().border_color(rgb(0x00ec_ecec)).bg(hex_hsla(&self.color))
     }
 }
 
-impl RenderOnce for Cell {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        div()
-            .id(self.id)
-            .w_full()
-            .h(px(32.))
-            .rounded(px(6.))
-            .cursor_pointer()
-            .bg(self.color)
-            .when(self.selected, |d| d.border_2().border_color(rgb(0x00ec_ecec)))
-    }
+fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
+    let (a, b) = (Rgba::from(a), Rgba::from(b));
+    let m = |x: f32, y: f32| x + (y - x) * t;
+    Rgba { r: m(a.r, b.r), g: m(a.g, b.g), b: m(a.b, b.b), a: 1.0 }.into()
 }
 
-/// The LED strip as a V, each LED's colour blending into its neighbours.
+fn frame_colors(led: &Led, frame: usize) -> [Hsla; 5] {
+    LED_ORDER.map(|p| hex_hsla(led_color(led, frame, p)))
+}
+
+/// The LEDs' colours `elapsed` into the animation, as the controller plays it: each step fades into the
+/// next over the step time. Played continuously it loops back to the first step; played on a button press
+/// it runs once and stays on the last step. Also returns whether it is still running.
+fn animation_frame(led: &Led, elapsed: Duration) -> ([Hsla; 5], bool) {
+    let frames = frame_count(led);
+    let last = frames.saturating_sub(1);
+    let step_ms = f32::from(led.step_time.max(1)) * 100.0;
+    let pos = elapsed.as_secs_f32() * 1000.0 / step_ms;
+    let count = f32::from(u8::try_from(frames).unwrap_or(1));
+    let looping = led.feedback == 0;
+    if !looping && pos >= count - 1.0 {
+        return (frame_colors(led, last), false);
+    }
+    let pos = if looping { pos % count } else { pos };
+    let k = usize::from(unit_to_u8(pos.floor())).min(last);
+    let t = pos - pos.floor();
+    let next = if k >= last { 0 } else { k.saturating_add(1) };
+    let (a, b) = (frame_colors(led, k), frame_colors(led, next));
+    (
+        std::array::from_fn(|i| mix(a.get(i).copied().unwrap_or_default(), b.get(i).copied().unwrap_or_default(), t)),
+        true,
+    )
+}
+
+/// The LED strip as a V. Each LED's colour holds near it and fades into its neighbours'.
 fn preview(colors: [Hsla; 5]) -> impl IntoElement {
     canvas(
         |_, _, _| {},
         move |bounds, (), window, _| {
             let (x0, y0) = (bounds.origin.x.as_f32(), bounds.origin.y.as_f32());
             let (w, h) = (bounds.size.width.as_f32(), bounds.size.height.as_f32());
-            let at = |t: f32| {
-                // 0..0.5 down the left arm, 0.5..1 up the right arm.
-                let x = x0 + w * (0.06 + 0.88 * t);
-                let depth = 1.0 - (t - 0.5).abs() * 2.0;
-                point(px(x), px(y0 + h * (0.12 + 0.76 * depth)))
+            let half = 6.0;
+            let (left, right, mid) = (x0 + w * 0.06, x0 + w * 0.94, x0 + w * 0.5);
+            let (top, bottom) = (y0 + h * 0.12, y0 + h * 0.88);
+            // Unit vector down the left arm; the right arm mirrors it.
+            let len = (mid - left).hypot(bottom - top).max(f32::EPSILON);
+            let (dx, dy) = ((mid - left) / len, (bottom - top) / len);
+            let center = |t: f32| (left + (right - left) * t, top + (bottom - top) * (1.0 - (t - 0.5).abs() * 2.0));
+            // A point on the band's outer (lower) or inner edge. At the tip both arms' edges meet on the
+            // middle line, so the V has no gap there.
+            let edge = |t: f32, outer: bool| {
+                let s = if outer { half } else { -half };
+                if (t - 0.5).abs() < 1e-4 {
+                    let (ox, oy) = (left - dy * s, top + dx * s);
+                    return point(px(mid), px(oy + (mid - ox) / dx * dy));
+                }
+                let (cx, cy) = center(t);
+                let (nx, ny) = if t < 0.5 { (-dy, dx) } else { (dy, dx) };
+                point(px(cx + nx * s), px(cy + ny * s))
             };
-            let steps = 60u8;
-            for i in 0..steps {
-                let (t0, t1) = (f32::from(i) / f32::from(steps), f32::from(i.saturating_add(1)) / f32::from(steps));
-                let tm = t0.midpoint(t1);
-                // LED k sits at t = k / 4; colours hold near an LED and blend between them.
-                let pos = tm * 4.0;
-                let k = pos.floor().clamp(0.0, 3.0);
-                let frac = pos - k;
-                let blend = ((frac - 0.3) / 0.4).clamp(0.0, 1.0);
-                let k = usize::from(model::unit_to_u8(k));
-                let a = colors.get(k).copied().unwrap_or_default();
-                let b = colors.get(k.saturating_add(1)).copied().unwrap_or(a);
-                let c = Hsla::from(Rgba::from(a).blend(Rgba { a: blend, ..Rgba::from(b) }));
-                let mut p = PathBuilder::stroke(px(12.));
-                p.move_to(at(t0));
-                p.line_to(at(t1));
+            let left_angle = dx.atan2(-dy).to_degrees().rem_euclid(360.0);
+            let right_angle = dx.atan2(dy).to_degrees().rem_euclid(360.0);
+            for k in 0..4u8 {
+                let (t0, t1) = (f32::from(k) / 4.0, f32::from(k.saturating_add(1)) / 4.0);
+                let mut p = PathBuilder::fill();
+                p.move_to(edge(t0, true));
+                p.line_to(edge(t1, true));
+                p.line_to(edge(t1, false));
+                p.line_to(edge(t0, false));
+                p.close();
+                let a = colors.get(usize::from(k)).copied().unwrap_or_default();
+                let b = colors.get(usize::from(k.saturating_add(1))).copied().unwrap_or(a);
+                let angle = if k < 2 { left_angle } else { right_angle };
+                let bg = linear_gradient(angle, linear_color_stop(a, 0.3), linear_color_stop(b, 0.7));
                 if let Ok(path) = p.build() {
-                    window.paint_path(path, c);
+                    window.paint_path(path, bg);
                 }
             }
         },
@@ -118,44 +156,37 @@ fn preview(colors: [Hsla; 5]) -> impl IntoElement {
 }
 
 impl FlugApp {
+    fn led_color_state(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<ColorPickerState> {
+        if let Some((state, _)) = &self.led_picker {
+            return state.clone();
+        }
+        let state = cx.new(|cx| ColorPickerState::new(window, cx));
+        let sub = cx.subscribe_in(&state, window, |this, _, ev: &ColorPickerEvent, _, cx| {
+            if let ColorPickerEvent::Change(Some(c)) = ev {
+                this.set_picked_color(&hsla_hex(*c));
+                cx.notify();
+            }
+        });
+        self.led_picker = Some((state.clone(), sub));
+        state
+    }
+
     pub fn render_leds(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(d) = self.current().cloned() else { return div().into_any_element() };
         let led = &d.led;
         let frames = frame_count(led);
         let selected = self.led_frame.min(frames.saturating_sub(1));
-
-        let hsv = self.picker_hsv;
-        let hue = self.slider("pick-h", (0.0, 359.0), hsv.0, |a, v| a.set_picker_hsv(|h| h.0 = v), window, cx);
-        let sat = self.slider(
-            "pick-s",
-            (0.0, 100.0),
-            hsv.1 * 100.0,
-            |a, v| a.set_picker_hsv(|h| h.1 = v / 100.0),
-            window,
-            cx,
-        );
-        let val = self.slider(
-            "pick-v",
-            (0.0, 100.0),
-            hsv.2 * 100.0,
-            |a, v| a.set_picker_hsv(|h| h.2 = v / 100.0),
-            window,
-            cx,
-        );
-        let picked = self.picker.map_or_else(String::new, |(f, p)| led_color(led, f, p).to_owned());
-        let hex = self.input(
-            "pick-hex",
-            &picked,
-            |a, text| {
-                if let Some((r, g, b)) = parse_hex(text.trim()) {
-                    a.picker_hsv = rgb_to_hsv(r, g, b);
-                    let color = format!("#{r:02x}{g:02x}{b:02x}");
-                    a.set_picked_color(&color);
+        let color_state = self.led_color_state(window, cx);
+        let wanted = self.picker.map(|(f, p)| hex_hsla(led_color(led, f, p)));
+        color_state.update(cx, |s, cx| {
+            if !s.is_open() && s.value() != wanted {
+                match wanted {
+                    Some(c) => s.set_value(c, window, cx),
+                    None => s.clear_value(window, cx),
                 }
-            },
-            window,
-            cx,
-        );
+            }
+        });
+
         let brightness = self.slider(
             "led-bright",
             (1.0, 100.0),
@@ -197,10 +228,10 @@ impl FlugApp {
             cx,
         );
 
-        let mut palette: Vec<String> = Vec::new();
+        let mut palette: Vec<Hsla> = Vec::new();
         for f in 0..frames {
             for p in LED_ORDER {
-                let c = led_color(led, f, p).to_owned();
+                let c = hex_hsla(led_color(led, f, p));
                 if !palette.contains(&c) {
                     palette.push(c);
                 }
@@ -224,93 +255,34 @@ impl FlugApp {
                         .child(f.saturating_add(1).to_string())
                         .on_click(cx.listener(move |a, _, _, cx| {
                             a.led_frame = f;
+                            a.led_anim = None;
                             cx.notify();
                         })),
                 )
                 .children(LED_ORDER.iter().enumerate().map(|(i, &pos)| {
                     let color = led_color(led, f, pos).to_owned();
-                    let open = self.picker == Some((f, pos));
-                    let this = this.clone();
-                    let (hue, sat, val, hex) = (hue.clone(), sat.clone(), val.clone(), hex.clone());
-                    let palette = palette.clone();
+                    let selected = self.picker == Some((f, pos));
                     let cell_id = f.saturating_mul(8).saturating_add(i);
-                    div().flex_1().child(
-                        Popover::new(("cell", cell_id))
-                            .anchor(Anchor::TopRight)
-                            .open(open)
-                            .on_open_change({
-                                let this = this.clone();
-                                move |open: &bool, _, cx| {
-                                    let open = *open;
-                                    this.update(cx, |a, cx| {
-                                        if open {
-                                            a.open_picker(f, pos);
-                                        } else if a.picker == Some((f, pos)) {
-                                            a.picker = None;
-                                        }
-                                        cx.notify();
-                                    })
-                                    .ok();
+                    div()
+                        .id(("cell", cell_id))
+                        .flex_1()
+                        .h(px(32.))
+                        .rounded(px(6.))
+                        .cursor_pointer()
+                        .bg(hex_hsla(&color))
+                        .when(selected, |d| d.border_2().border_color(rgb(0x00ec_ecec)))
+                        .drag_over::<DraggedColor>(|s, _, _, _| s.border_2().border_color(Colors::highlight()))
+                        .on_drag(DraggedColor { color }, |d, _, _, cx| cx.new(|_| d.clone()))
+                        .on_drop(cx.listener(move |a, dragged: &DraggedColor, _, cx| {
+                            let c = dragged.color.clone();
+                            a.edit(cx, |d| {
+                                if led_color(&d.led, f, pos) != c {
+                                    set_led_color(&mut d.led, f, pos, &c);
+                                    d.led.app_preset = 0;
                                 }
-                            })
-                            .trigger(Cell { id: ("cell-btn", cell_id).into(), color: hex_hsla(&color), selected: open })
-                            .content(move |_, _, cx| {
-                                let muted = cx.theme().muted_foreground;
-                                let this = this.clone();
-                                v_flex()
-                                    .w(px(240.))
-                                    .gap_3()
-                                    .text_xs()
-                                    .child(
-                                        v_flex()
-                                            .gap_1()
-                                            .child(div().text_color(muted).child("Hue"))
-                                            .child(Slider::new(&hue)),
-                                    )
-                                    .child(
-                                        v_flex()
-                                            .gap_1()
-                                            .child(div().text_color(muted).child("Saturation"))
-                                            .child(Slider::new(&sat)),
-                                    )
-                                    .child(
-                                        v_flex()
-                                            .gap_1()
-                                            .child(div().text_color(muted).child("Brightness"))
-                                            .child(Slider::new(&val)),
-                                    )
-                                    .child(Input::new(&hex).small())
-                                    .child(
-                                        v_flex()
-                                            .gap_1()
-                                            .child(div().text_color(muted).child("Colours in this animation"))
-                                            .child(h_flex().gap_1p5().children(palette.iter().enumerate().map(
-                                                |(k, c)| {
-                                                    let c2 = c.clone();
-                                                    let this = this.clone();
-                                                    div()
-                                                        .id(("swatch", k))
-                                                        .flex_1()
-                                                        .h(px(18.))
-                                                        .rounded(px(4.))
-                                                        .cursor_pointer()
-                                                        .bg(hex_hsla(c))
-                                                        .on_click(move |_, _, cx| {
-                                                            let c = c2.clone();
-                                                            this.update(cx, |a, cx| {
-                                                                if let Some((r, g, b)) = parse_hex(&c) {
-                                                                    a.picker_hsv = rgb_to_hsv(r, g, b);
-                                                                }
-                                                                a.set_picked_color(&c);
-                                                                cx.notify();
-                                                            })
-                                                            .ok();
-                                                        })
-                                                },
-                                            ))),
-                                    )
-                            }),
-                    )
+                            });
+                        }))
+                        .on_click(cx.listener(move |a, _, window, cx| a.open_picker(f, pos, window, cx)))
                 }))
         }));
 
@@ -376,9 +348,38 @@ impl FlugApp {
                     })
                 }
             });
-        let preview_colors = LED_ORDER.map(|p| hex_hsla(led_color(led, selected, p)));
+
+        let (preview_colors, playing) = match self.led_anim {
+            Some(start) => {
+                let (colors, running) = animation_frame(led, start.elapsed());
+                self.led_anim_done = !running;
+                (colors, running)
+            }
+            None => (frame_colors(led, selected), false),
+        };
+        let preview_text = match (self.led_anim, playing) {
+            (Some(_), true) => "Playing".to_owned(),
+            (Some(_), false) => format!("Played once, stays on frame {frames}"),
+            (None, _) => format!("Frame {} of {frames}", selected.saturating_add(1)),
+        };
+        let play_button = Button::new("led-play")
+            .small()
+            .icon(Icon::new(if playing { gpui_kit::assets::IconName::Pause } else { gpui_kit::assets::IconName::Play }))
+            .label(if playing { "Pause" } else { "Play" })
+            .on_click(cx.listener(move |a, _, _, cx| {
+                if playing {
+                    a.led_anim = None;
+                    cx.notify();
+                } else {
+                    a.play_leds(cx);
+                }
+            }));
         let step_ms = u32::from(led.step_time).saturating_mul(100);
         let advanced_open = self.advanced_open("leds");
+        let picked_label = self.picker.map_or_else(
+            || "Selected LED".to_owned(),
+            |(f, p)| format!("Frame {}, {} LED", f.saturating_add(1), pos_name(p)),
+        );
 
         h_flex()
             .items_start()
@@ -390,13 +391,10 @@ impl FlugApp {
                     .gap_2()
                     .child(h_flex().justify_between().child(heading("Frames")).child(frame_buttons))
                     .child(card(cx).p_3().child(grid))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .px_0p5()
-                            .child(format!("Plays frames 1–{frames}, {step_ms} ms each")),
-                    ),
+                    .child(div().text_xs().text_color(cx.theme().muted_foreground).px_0p5().child(format!(
+                        "Plays frames 1–{frames}, {step_ms} ms each. Click a tile to change its colour, \
+                                 drag it onto another tile to copy it there."
+                    ))),
             )
             .child(
                 v_flex()
@@ -406,7 +404,11 @@ impl FlugApp {
                     .child(heading("Effect"))
                     .child(
                         card(cx)
-                            .child(row("Preset", None, preset_button, cx).border_t_0())
+                            .child(
+                                row(picked_label, None, ColorSelect::new(&color_state).featured_colors(palette), cx)
+                                    .border_t_0(),
+                            )
+                            .child(row("Preset", None, preset_button, cx))
                             .child(row(
                                 "Plays",
                                 None,
@@ -453,31 +455,57 @@ impl FlugApp {
                                 ),
                             ),
                     )
-                    .child(heading("Preview").mt_2())
+                    .child(h_flex().mt_2().justify_between().child(heading("Preview")).child(play_button))
                     .child(
-                        card(cx).py_4().items_center().gap_2().child(preview(preview_colors)).child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(format!("Frame {} of {frames}", selected.saturating_add(1))),
-                        ),
+                        card(cx)
+                            .py_4()
+                            .items_center()
+                            .gap_2()
+                            .child(preview(preview_colors))
+                            .child(div().text_xs().text_color(cx.theme().muted_foreground).child(preview_text)),
                     ),
             )
             .into_any_element()
     }
 
-    fn open_picker(&mut self, frame: usize, pos: LedPos) {
-        self.picker = Some((frame, pos));
-        self.led_frame = frame;
-        if let Some((r, g, b)) = self.current().and_then(|d| parse_hex(led_color(&d.led, frame, pos))) {
-            self.picker_hsv = rgb_to_hsv(r, g, b);
-        }
+    /// Starts the preview animation; it redraws until paused, the page is left or a play-once run ends.
+    fn play_leds(&mut self, cx: &mut Context<Self>) {
+        self.led_anim = Some(Instant::now());
+        self.led_anim_done = false;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(33)).await;
+                let go = this
+                    .update(cx, |a, cx| {
+                        if a.page != Page::Leds {
+                            a.led_anim = None;
+                        }
+                        cx.notify();
+                        a.led_anim.is_some() && !a.led_anim_done
+                    })
+                    .unwrap_or(false);
+                if !go {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
     }
 
-    fn set_picker_hsv(&mut self, f: impl FnOnce(&mut (f32, f32, f32))) {
-        f(&mut self.picker_hsv);
-        let color = hsv_hex(self.picker_hsv);
-        self.set_picked_color(&color);
+    fn open_picker(&mut self, frame: usize, pos: LedPos, window: &mut Window, cx: &mut Context<Self>) {
+        self.picker = Some((frame, pos));
+        self.led_frame = frame;
+        self.led_anim = None;
+        let color = self.current().map(|d| hex_hsla(led_color(&d.led, frame, pos)));
+        let state = self.led_color_state(window, cx);
+        state.update(cx, |s, cx| {
+            if let Some(c) = color {
+                s.set_value(c, window, cx);
+            }
+            s.set_open(true, cx);
+        });
+        cx.notify();
     }
 
     fn set_picked_color(&mut self, color: &str) {

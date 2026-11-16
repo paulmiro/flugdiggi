@@ -5,13 +5,14 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::prelude::*;
 use color_eyre::Result;
 use flugdiggi_core::{DeviceSummary, Slot, UsbPort};
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::color_picker::ColorPickerState;
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::progress::Progress;
@@ -68,13 +69,17 @@ pub struct FlugApp {
     /// Stick whose settings are copied to the other one, if any.
     pub stick_copy: Option<Side>,
     pub trigger_copy: Option<Side>,
-    /// LED cell whose colour picker is open.
+    /// LED cell selected for the colour picker.
     pub picker: Option<(usize, LedPos)>,
     pub macro_sel: usize,
     /// Selected LED frame.
     pub led_frame: usize,
-    /// Colour picker value as hue (degrees), saturation and value (0-1).
-    pub picker_hsv: (f32, f32, f32),
+    /// The LED page's colour picker, created on first use.
+    pub led_picker: Option<(Entity<ColorPickerState>, Subscription)>,
+    /// When the LED preview animation started playing.
+    pub led_anim: Option<Instant>,
+    /// Whether a play-once animation has reached its end.
+    pub led_anim_done: bool,
     advanced: std::collections::HashSet<String>,
     _poll: Task<()>,
 }
@@ -120,7 +125,9 @@ impl FlugApp {
             picker: None,
             macro_sel: 0,
             led_frame: 0,
-            picker_hsv: (0.0, 0.0, 0.0),
+            led_picker: None,
+            led_anim: None,
+            led_anim_done: false,
             advanced: std::collections::HashSet::new(),
             _poll: poll,
         }

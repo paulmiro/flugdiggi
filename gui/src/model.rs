@@ -279,24 +279,6 @@ pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
     (unit_to_u8((r + m) * 255.0), unit_to_u8((g + m) * 255.0), unit_to_u8((b + m) * 255.0))
 }
 
-pub fn rgb_to_hsv(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
-    let (r, g, b) = (f32::from(r) / 255.0, f32::from(g) / 255.0, f32::from(b) / 255.0);
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-    let d = max - min;
-    let h = if d <= f32::EPSILON {
-        0.0
-    } else if (max - r).abs() <= f32::EPSILON {
-        60.0 * ((g - b) / d).rem_euclid(6.0)
-    } else if (max - g).abs() <= f32::EPSILON {
-        60.0 * ((b - r) / d + 2.0)
-    } else {
-        60.0 * ((r - g) / d + 4.0)
-    };
-    let s = if max <= f32::EPSILON { 0.0 } else { d / max };
-    (h, s, max)
-}
-
 /// A slot as read from the controller, plus the user's unsaved edits.
 #[derive(Debug, Clone)]
 pub struct SlotData {
