@@ -1,4 +1,5 @@
 use crate::prelude::*;
+use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::{ActiveTheme, Sizable, v_flex};
@@ -119,6 +120,45 @@ impl FlugApp {
                 .child(info_row("Firmware", i.firmware.to_string(), true, cx))
                 .child(info_row("Battery", i.battery.to_string(), false, cx))
                 .child(info_row("Data version", format!("{:04x}", d.saved_config.data_version), true, cx)),
+        );
+        columns(left, right).into_any_element()
+    }
+
+    /// Shown until the controller's data is loaded: only what can be read without detaching xpad.
+    pub fn render_unloaded(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(s) = self.entry().map(|e| e.summary.clone()) else { return div().into_any_element() };
+        let mono = cx.theme().mono_font_family.clone();
+        let muted = cx.theme().muted_foreground;
+        let info_row = |label: &str, value: String, mono_font: bool, cx: &App| {
+            row(
+                label.to_owned(),
+                None,
+                div().text_color(muted).when(mono_font, |d| d.font_family(mono.clone())).child(value),
+                cx,
+            )
+        };
+        let connection =
+            if s.connection_guessed { format!("{} (guessed)", s.connection) } else { s.connection.to_string() };
+        let left = v_flex()
+            .gap_2()
+            .child(heading("Controller data"))
+            .child(Alert::warning(
+                "load-warning",
+                "While loading, which takes a few seconds, the controller is disconnected from games. It \
+                 reconnects by itself when loading is done.",
+            ))
+            .child(
+                Button::new("load")
+                    .primary()
+                    .label("Load Controller Data")
+                    .disabled(self.is_busy())
+                    .on_click(cx.listener(|a, _, _, cx| a.reload(cx))),
+            );
+        let right = v_flex().gap_2().child(heading("Controller")).child(
+            card(cx)
+                .child(info_row("Model", s.product, false, cx).border_t_0())
+                .child(info_row("Connection", connection, false, cx))
+                .child(info_row("USB port", s.port.to_string(), true, cx)),
         );
         columns(left, right).into_any_element()
     }

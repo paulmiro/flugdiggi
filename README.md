@@ -81,7 +81,8 @@ only if it reports the same MAC.
 ## Desktop app (`flugdiggi-gui`)
 
 Lists all connected controllers in the sidebar (polled every 3 s, without claiming them). Selecting one
-reads all 8 slots (about 3 s; games lose the controller for that time). Edits stay in the app until **Save**,
+shows only what can be read without claiming it; **Load Controller Data** then reads all 8 slots (games
+lose the controller for that time). Edits stay in the app until **Save**,
 which writes the selected slot, saves it to flash and verifies it, after saving the slot's previous content to
 `~/.local/share/flugdiggi/backups/`. Switching to another slot or controller with unsaved edits asks whether
 to save or discard them. Settings the official app does not show are under **Advanced**. Log output goes to

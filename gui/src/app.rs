@@ -252,9 +252,6 @@ impl FlugApp {
     fn select_controller(&mut self, port: UsbPort, cx: &mut Context<Self>) {
         self.selected = Some(port);
         self.picker = None;
-        if self.entry().is_some_and(|e| e.loaded.is_none()) {
-            self.reload(cx);
-        }
         cx.notify();
     }
 
@@ -575,6 +572,7 @@ impl FlugApp {
         let this = cx.entity().downgrade();
         let status = match (&busy, changes) {
             (Some(label), _) => h_flex().gap_2().child(Spinner::new().small()).child(label.clone()).into_any_element(),
+            (None, _) if !has_data => div().into_any_element(),
             (None, 0) => div().child("No unsaved changes").into_any_element(),
             (None, n) => h_flex()
                 .gap_2()
@@ -588,37 +586,41 @@ impl FlugApp {
                 .h_full()
                 .pr_2()
                 .gap_2()
-                .child(
-                    TabBar::new("pages")
-                        .pill()
-                        .small()
-                        .selected_index(selected)
-                        .children(Page::ALL.iter().map(|p| Tab::new().label(p.label())))
-                        .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                            if let Some(p) = Page::ALL.get(*ix) {
-                                this.page = *p;
-                                this.picker = None;
-                                cx.notify();
-                            }
-                        })),
-                )
+                .when(has_data, |d| {
+                    d.child(
+                        TabBar::new("pages")
+                            .pill()
+                            .small()
+                            .selected_index(selected)
+                            .children(Page::ALL.iter().map(|p| Tab::new().label(p.label())))
+                            .on_click(cx.listener(|this, ix: &usize, _, cx| {
+                                if let Some(p) = Page::ALL.get(*ix) {
+                                    this.page = *p;
+                                    this.picker = None;
+                                    cx.notify();
+                                }
+                            })),
+                    )
+                })
                 .child(div().flex_1())
                 .child(div().text_sm().text_color(cx.theme().muted_foreground).child(status))
-                .child(
-                    Button::new("discard")
-                        .label("Discard")
-                        .small()
-                        .disabled(changes == 0 || busy.is_some())
-                        .on_click(cx.listener(|this, _, _, cx| this.discard(cx))),
-                )
-                .child(
-                    Button::new("save")
-                        .label("Save")
-                        .primary()
-                        .small()
-                        .disabled(changes == 0 || busy.is_some())
-                        .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
-                )
+                .when(has_data, |d| {
+                    d.child(
+                        Button::new("discard")
+                            .label("Discard")
+                            .small()
+                            .disabled(changes == 0 || busy.is_some())
+                            .on_click(cx.listener(|this, _, _, cx| this.discard(cx))),
+                    )
+                    .child(
+                        Button::new("save")
+                            .label("Save")
+                            .primary()
+                            .small()
+                            .disabled(changes == 0 || busy.is_some())
+                            .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
+                    )
+                })
                 .child(Button::new("menu").icon(IconName::Menu).ghost().small().dropdown_menu(move |menu, _, _| {
                     let (reload, backups) = (this.clone(), this.clone());
                     menu.item(PopupMenuItem::new("Read again from the controller").disabled(!has_data).on_click(
@@ -665,8 +667,12 @@ impl FlugApp {
                 cx,
             );
         }
+        if self.entry().is_none() {
+            return empty_state("Select a controller", "Choose one in the sidebar.", cx);
+        }
         if self.current().is_none() {
-            return empty_state("Select a controller", "Its slots are read when you select it.", cx);
+            let page = self.render_unloaded(cx);
+            return div().id("page").size_full().overflow_y_scroll().px_5().py_4().child(page).into_any_element();
         }
         let page = match self.page {
             Page::Buttons => self.render_buttons(window, cx),
