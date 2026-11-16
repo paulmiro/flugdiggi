@@ -428,6 +428,7 @@ impl FlugApp {
                 .ghost()
                 .small()
                 .w_full()
+                .h(px(36.))
                 .label("Advanced")
                 .icon(if open { IconName::ChevronDown } else { IconName::ChevronRight })
                 .on_click(cx.listener(move |this, _, _, cx| {
