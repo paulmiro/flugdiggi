@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::prelude::*;
 use flugdiggi_core::{Battery, Connection};
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::radio::Radio;
 use gpui_kit::component::sidebar::{Sidebar, SidebarItem};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Collapsible, Icon, IconName, Sizable, h_flex, v_flex};
@@ -16,6 +17,7 @@ use crate::model::{LED_ORDER, led_color, parse_hex};
 use crate::theme::Colors;
 
 type Handler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+type Activate = Rc<dyn Fn(&mut Window, &mut App)>;
 
 #[derive(Clone)]
 struct ControllerRow {
@@ -35,8 +37,8 @@ struct SlotRow {
     active: bool,
     edited: bool,
     on_click: Handler,
-    /// Makes the controller use this slot; `None` where that isn't offered.
-    on_activate: Option<Handler>,
+    /// Makes the controller use this slot, and whether that is possible right now; `None` where it isn't offered.
+    on_activate: Option<(Activate, bool)>,
 }
 
 #[derive(Clone)]
@@ -111,7 +113,7 @@ impl Rows {
                         div()
                             .id(child_id(format!("bat{i}")))
                             .text_color(color.unwrap_or(muted))
-                            .child(Icon::new(icon).small())
+                            .child(Icon::new(icon).size_7())
                             .tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx))
                     });
                     row_base(child_id(format!("c{i}")), r.selected, r.on_click, cx).child(
@@ -132,14 +134,24 @@ impl Rows {
                 .gap_px()
                 .children(rows.into_iter().map(|r| {
                     let number_color = if r.selected { Colors::highlight() } else { muted };
-                    let activate = r.on_activate.map(|on_activate| {
-                        Button::new(child_id(format!("act{}", r.number)))
-                            .ghost()
-                            .xsmall()
-                            .label("Activate")
-                            .tooltip("Make the controller use this slot now")
-                            .on_click(move |e, w, cx| on_activate(e, w, cx))
+                    let active = r.active;
+                    let activate = r.on_activate.map(|(on_activate, enabled)| {
+                        Radio::new(child_id(format!("act{}", r.number)))
+                            .checked(active)
+                            .disabled(!enabled)
+                            .tooltip(if active {
+                                "The controller uses this slot"
+                            } else {
+                                "Make the controller use this slot now"
+                            })
+                            .on_click(move |_, w, cx| {
+                                cx.stop_propagation();
+                                if !active {
+                                    on_activate(w, cx);
+                                }
+                            })
                     });
+                    let has_radio = activate.is_some();
                     row_base(child_id(format!("s{}", r.number)), r.selected, r.on_click, cx).child(
                         v_flex()
                             .gap_1p5()
@@ -158,7 +170,7 @@ impl Rows {
                                     )
                                     .child(div().flex_1().child(r.name))
                                     .when(r.edited, |d| d.child(div().size(px(6.)).rounded_full().bg(Colors::edited())))
-                                    .when(r.active, |d| {
+                                    .when(r.active && !has_radio, |d| {
                                         d.child(div().text_xs().font_semibold().text_color(muted).child("ACTIVE"))
                                     })
                                     .children(activate),
@@ -251,12 +263,12 @@ pub fn render(app: &FlugApp, cx: &mut Context<FlugApp>) -> impl IntoElement {
             let number = u8::try_from(i).ok()?;
             let name = if d.config.name.trim().is_empty() { "Unnamed".to_owned() } else { d.config.name.clone() };
             let active = loaded.active.slot.get() == number;
-            let on_activate: Option<Handler> = (i < 4 && !active && !busy).then(|| {
-                let h: Handler = Rc::new(cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.request_activate(i, window, cx);
-                }));
-                h
+            let on_activate: Option<(Activate, bool)> = (i < 4).then(|| {
+                let this = cx.entity().downgrade();
+                let h: Activate = Rc::new(move |window, cx| {
+                    this.update(cx, |a, cx| a.request_activate(i, window, cx)).ok();
+                });
+                (h, !busy)
             });
             Some(SlotRow {
                 number,
