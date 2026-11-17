@@ -5,6 +5,8 @@ use flugdiggi_core::led::{Led, Leds};
 
 /// Number of slots: 0-3 for `XInput` mode, 4-7 for Switch mode.
 pub const SLOTS: u8 = 8;
+/// Slots 0-3, used in `XInput` mode.
+pub const XINPUT_SLOTS: u8 = 4;
 /// Animation steps stored per LED.
 pub const FRAMES: usize = 10;
 pub const MAX_MACROS: usize = 5;

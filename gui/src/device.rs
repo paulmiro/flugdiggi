@@ -16,7 +16,9 @@ use flugdiggi_core::{
 };
 use tracing::{debug, info};
 
-use crate::model::{SLOTS, SlotData};
+use std::ops::Range;
+
+use crate::model::SlotData;
 
 static IO: Mutex<()> = Mutex::new(());
 
@@ -34,24 +36,32 @@ pub fn list() -> Result<Vec<DeviceSummary>> {
 pub struct Loaded {
     pub info: DeviceInfo,
     pub active: ActiveSlot,
-    pub slots: Vec<SlotData>,
+    /// Every slot, `None` where it wasn't read.
+    pub slots: Vec<Option<SlotData>>,
 }
 
-/// Reads the device info and both blobs of every slot. `progress` counts finished slots.
-pub fn load(port: &UsbPort, progress: &AtomicUsize) -> Result<Loaded> {
+fn read(c: &mut Controller, slots: Range<u8>, progress: &AtomicUsize) -> Result<Vec<SlotData>> {
+    let numbers = slots.map(Slot::new).collect::<Result<Vec<_>, _>>()?;
+    Ok(c.read_slots(&numbers, |done| progress.store(done, Ordering::Relaxed))
+        .wrap_err("reading the slots")?
+        .into_iter()
+        .map(|(config, led)| SlotData::new(config, led))
+        .collect())
+}
+
+/// Reads the device info and both blobs of the slots in `slots`. `progress` counts finished slots.
+pub fn load(
+    port: &UsbPort,
+    slots: Range<u8>,
+    progress: &AtomicUsize,
+) -> Result<(DeviceInfo, ActiveSlot, Vec<SlotData>)> {
     let _io = IO.lock().unwrap_or_else(PoisonError::into_inner);
     let mut c = open(port)?;
     let info = c.info().wrap_err("reading the device info")?;
     let active = c.active_slot().wrap_err("reading the active slot")?;
-    let numbers = (0..SLOTS).map(Slot::new).collect::<Result<Vec<_>, _>>()?;
-    let slots = c
-        .read_slots(&numbers, |done| progress.store(done, Ordering::Relaxed))
-        .wrap_err("reading the slots")?
-        .into_iter()
-        .map(|(config, led)| SlotData::new(config, led))
-        .collect();
-    info!(%port, "read all slots");
-    Ok(Loaded { info, active, slots })
+    let data = read(&mut c, slots.clone(), progress)?;
+    info!(%port, ?slots, "read slots");
+    Ok((info, active, data))
 }
 
 /// Where the previous content of a slot is saved before every write.

@@ -25,7 +25,7 @@ use gpui_kit::*;
 use tracing::{error, info, warn};
 
 use crate::device::{self, Loaded};
-use crate::model::{LedPos, Page, SLOTS, Side, SlotData};
+use crate::model::{LedPos, Page, SLOTS, Side, SlotData, XINPUT_SLOTS};
 use crate::sidebar;
 use crate::theme::Colors;
 
@@ -154,7 +154,7 @@ impl FlugApp {
     }
 
     pub fn current(&self) -> Option<&SlotData> {
-        self.loaded()?.slots.get(self.slot)
+        self.loaded()?.slots.get(self.slot)?.as_ref()
     }
 
     pub fn is_busy(&self) -> bool {
@@ -167,7 +167,8 @@ impl FlugApp {
             return;
         }
         let slot = self.slot;
-        if let Some(d) = self.entry_mut().and_then(|e| e.loaded.as_mut()).and_then(|l| l.slots.get_mut(slot)) {
+        if let Some(d) = self.entry_mut().and_then(|e| e.loaded.as_mut()).and_then(|l| l.slots.get_mut(slot)?.as_mut())
+        {
             f(d);
             cx.notify();
         }
@@ -179,7 +180,8 @@ impl FlugApp {
             return;
         }
         let slot = self.slot;
-        if let Some(d) = self.entry_mut().and_then(|e| e.loaded.as_mut()).and_then(|l| l.slots.get_mut(slot)) {
+        if let Some(d) = self.entry_mut().and_then(|e| e.loaded.as_mut()).and_then(|l| l.slots.get_mut(slot)?.as_mut())
+        {
             f(d);
         }
     }
@@ -284,23 +286,53 @@ impl FlugApp {
         .detach();
     }
 
+    /// Reads the controller's `XInput` mode slots, and the Switch mode slots if they were loaded before.
     pub fn reload(&mut self, cx: &mut Context<Self>) {
+        let switch_loaded = self.switch_slots_loaded();
+        self.read_slots(if switch_loaded { 0..SLOTS } else { 0..XINPUT_SLOTS }, cx);
+    }
+
+    /// Reads the Switch mode slots, which aren't read with the others.
+    pub fn load_switch_slots(&mut self, cx: &mut Context<Self>) {
+        self.read_slots(XINPUT_SLOTS..SLOTS, cx);
+    }
+
+    pub fn switch_slots_loaded(&self) -> bool {
+        self.loaded().is_some_and(|l| l.slots.iter().skip(usize::from(XINPUT_SLOTS)).any(Option::is_some))
+    }
+
+    fn read_slots(&mut self, slots: std::ops::Range<u8>, cx: &mut Context<Self>) {
         let Some(port) = self.selected.clone() else { return };
         let progress = Arc::new(AtomicUsize::new(0));
         let p = progress.clone();
+        let first = usize::from(slots.start);
+        let label = if slots.start == 0 { "Reading slots" } else { "Reading Switch mode slots" };
         self.run(
-            "Reading slots",
-            Some((progress, usize::from(SLOTS))),
-            move || device::load(&port, &p),
-            |this, r, cx| match r {
-                Ok(loaded) => {
+            label,
+            Some((progress, slots.len())),
+            move || device::load(&port, slots, &p),
+            move |this, r, cx| match r {
+                Ok((info, active, data)) => {
                     this.stop_copying();
-                    let active = usize::from(loaded.active.slot.get());
-                    if let Some(e) = this.entry_mut() {
-                        e.loaded = Some(loaded);
+                    let Some(e) = this.entry_mut() else { return };
+                    let loaded = e.loaded.get_or_insert_with(|| Loaded {
+                        info: info.clone(),
+                        active,
+                        slots: vec![None; usize::from(SLOTS)],
+                    });
+                    loaded.info = info;
+                    loaded.active = active;
+                    if first == 0 {
+                        loaded.slots.fill(None);
                     }
-                    if this.slot >= usize::from(SLOTS) {
-                        this.slot = active;
+                    for (slot, d) in loaded.slots.iter_mut().skip(first).zip(data) {
+                        *slot = Some(d);
+                    }
+                    if this.current().is_none() {
+                        this.slot = usize::from(active.slot.get());
+                        if this.current().is_none() {
+                            this.slot = 0;
+                        }
                     }
                 }
                 Err(e) => this.show_error("Reading the controller failed", &e, cx),
@@ -321,7 +353,7 @@ impl FlugApp {
                 Ok((config, led)) => {
                     let mut target = None;
                     if let Some(d) =
-                        this.entry_mut().and_then(|e| e.loaded.as_mut()).and_then(|l| l.slots.get_mut(index))
+                        this.entry_mut().and_then(|e| e.loaded.as_mut()).and_then(|l| l.slots.get_mut(index)?.as_mut())
                     {
                         *d = SlotData::new(config, led);
                         target = Some(());

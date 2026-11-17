@@ -13,7 +13,7 @@ use gpui_kit::component::{ActiveTheme, Collapsible, Icon, IconName, Sizable, h_f
 use gpui_kit::*;
 
 use crate::app::FlugApp;
-use crate::model::{LED_ORDER, led_color, parse_hex};
+use crate::model::{LED_ORDER, SlotData, led_color, parse_hex};
 use crate::theme::Colors;
 
 type Handler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -36,7 +36,8 @@ struct SlotRow {
     selected: bool,
     active: bool,
     edited: bool,
-    on_click: Handler,
+    /// `None` while the slot isn't loaded.
+    on_click: Option<Handler>,
     /// Makes the controller use this slot, and whether that is possible right now; `None` where it isn't offered.
     on_activate: Option<(Activate, bool)>,
 }
@@ -51,7 +52,8 @@ enum Rows {
 #[derive(Clone)]
 struct Group {
     label: SharedString,
-    action: Option<(IconName, &'static str, Handler)>,
+    /// Icon, label, tooltip and click handler.
+    action: Option<(IconName, Option<&'static str>, &'static str, Handler)>,
     rows: Rows,
 }
 
@@ -153,7 +155,12 @@ impl Rows {
                     let has_radio = activate.is_some();
                     // The radio sits beside the row rather than inside it, so the two click targets don't overlap.
                     // Rows without one keep the space, so all slot rows line up.
-                    let row = row_base(child_id(format!("s{}", r.number)), r.selected, r.on_click, cx).child(
+                    let id = child_id(format!("s{}", r.number));
+                    let row = match r.on_click {
+                        Some(on_click) => row_base(id, r.selected, on_click, cx),
+                        None => div().id(id).w_full().px_2p5().py_1p5().opacity(0.4),
+                    };
+                    let row = row.child(
                         v_flex()
                             .gap_1p5()
                             .child(
@@ -194,9 +201,10 @@ impl Rows {
 impl SidebarItem for Group {
     fn render(self, id: impl Into<ElementId>, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let id: ElementId = id.into();
-        let action = self.action.map(|(icon, tooltip, on_click)| {
+        let action = self.action.map(|(icon, label, tooltip, on_click)| {
             Button::new(ElementId::NamedChild(Arc::new(id.clone()), "action".into()))
                 .icon(icon)
+                .when_some(label, Button::label)
                 .ghost()
                 .xsmall()
                 .tooltip(tooltip)
@@ -257,15 +265,19 @@ pub fn render(app: &FlugApp, cx: &mut Context<FlugApp>) -> impl IntoElement {
     let refresh: Handler = Rc::new(cx.listener(|this, _, _, cx| this.refresh(cx)));
     let mut groups = vec![Group {
         label: "Controllers".into(),
-        action: Some((IconName::RefreshCw, "Look for controllers", refresh)),
+        action: Some((IconName::RefreshCw, None, "Look for controllers", refresh)),
         rows: Rows::Controllers(controllers),
     }];
     if let Some(loaded) = app.loaded() {
         let busy = app.is_busy();
         let slot_row = |i: usize| {
-            let d = loaded.slots.get(i)?;
+            let d = loaded.slots.get(i)?.as_ref();
             let number = u8::try_from(i).ok()?;
-            let name = if d.config.name.trim().is_empty() { "Unnamed".to_owned() } else { d.config.name.clone() };
+            let name = match d {
+                None => "Not loaded".to_owned(),
+                Some(d) if d.config.name.trim().is_empty() => "Unnamed".to_owned(),
+                Some(d) => d.config.name.clone(),
+            };
             let active = loaded.active.slot.get() == number;
             let on_activate: Option<(Activate, bool)> = (i < 4).then(|| {
                 let this = cx.entity().downgrade();
@@ -277,11 +289,16 @@ pub fn render(app: &FlugApp, cx: &mut Context<FlugApp>) -> impl IntoElement {
             Some(SlotRow {
                 number,
                 name: name.into(),
-                leds: LED_ORDER.iter().map(|&p| hex_color(led_color(&d.led, 0, p))).collect(),
+                leds: LED_ORDER
+                    .iter()
+                    .map(|&p| d.map_or_else(Colors::line, |d| hex_color(led_color(&d.led, 0, p))))
+                    .collect(),
                 selected: app.slot == i,
                 active,
-                edited: d.is_dirty(),
-                on_click: Rc::new(cx.listener(move |this, _, window, cx| this.go_slot(i, window, cx))),
+                edited: d.is_some_and(SlotData::is_dirty),
+                on_click: d.is_some().then(|| -> Handler {
+                    Rc::new(cx.listener(move |this, _, window, cx| this.go_slot(i, window, cx)))
+                }),
                 on_activate,
             })
         };
@@ -290,9 +307,18 @@ pub fn render(app: &FlugApp, cx: &mut Context<FlugApp>) -> impl IntoElement {
             action: None,
             rows: Rows::Slots((0..4).filter_map(slot_row).collect()),
         });
+        let load_switch = (!app.switch_slots_loaded() && !busy).then(|| {
+            let h: Handler = Rc::new(cx.listener(|this, _, _, cx| this.load_switch_slots(cx)));
+            (
+                IconName::ArrowDown,
+                Some("Load"),
+                "Read the Switch mode slots. The controller is disconnected from games for a few seconds.",
+                h,
+            )
+        });
         groups.push(Group {
             label: "Switch mode slots".into(),
-            action: None,
+            action: load_switch,
             rows: Rows::Slots((4..8).filter_map(slot_row).collect()),
         });
     }
