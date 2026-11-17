@@ -463,9 +463,18 @@ const DEFAULT_WAIT_MS: u32 = 100;
 pub const WAIT_SNAPS: [u32; 18] =
     [0, 10, 20, 30, 50, 80, 100, 150, 200, 300, 500, 750, 1000, 1500, 2000, 3000, 5000, 8000];
 
-/// Index of the snap value closest to `ms`.
-pub fn nearest_snap(ms: u32) -> usize {
-    WAIT_SNAPS.iter().enumerate().min_by_key(|(_, s)| s.abs_diff(ms)).map_or(0, |(i, _)| i)
+/// Slider stops for the pause between repeats (the official app allows up to 2500 ms).
+pub const PAUSE_SNAPS: [u32; 16] = [0, 10, 20, 30, 50, 80, 100, 150, 200, 300, 500, 750, 1000, 1500, 2000, 2500];
+
+/// Index of the value in `snaps` closest to `ms`.
+pub fn nearest_snap(snaps: &[u32], ms: u32) -> usize {
+    snaps.iter().enumerate().min_by_key(|(_, s)| s.abs_diff(ms)).map_or(0, |(i, _)| i)
+}
+
+/// Hue of a stick direction: a rainbow going clockwise from red at Up. `None` for the centre.
+pub fn stick_direction_hue(key: &str) -> Option<f32> {
+    let i = STICK_DIRECTIONS.iter().position(|d| *d == key).filter(|i| *i > 0)?;
+    Some(f32::from(u8::try_from(i.saturating_sub(1)).ok()?) / 8.0)
 }
 
 /// Each step's wait after the previous step; the first step's wait counts from the button press.
@@ -526,7 +535,7 @@ pub fn remove_step(m: &mut Macro, index: usize) {
 
 /// Adds a step after the last one. After a button press it releases that button.
 pub fn add_step(m: &mut Macro) {
-    let at = m.steps.last().map_or(0, |s| s.at_ms).saturating_add(DEFAULT_WAIT_MS).min(MAX_STEP_MS);
+    let at = m.steps.last().map_or(0, |s| s.at_ms.saturating_add(DEFAULT_WAIT_MS).min(MAX_STEP_MS));
     let step = match m.steps.last() {
         Some(last) if last.event == EVENT_PRESS => Step { at_ms: at, key: last.key.clone(), event: EVENT_RELEASE },
         _ => Step { at_ms: at, key: "a".to_owned(), event: EVENT_PRESS },
@@ -706,5 +715,12 @@ mod tests {
         assert_eq!((last.at_ms, last.key.as_str(), last.event), (100, "x", EVENT_RELEASE));
         add_step(&mut m);
         assert_eq!(m.steps.last().map(|s| s.event), Some(EVENT_PRESS));
+    }
+
+    #[test]
+    fn the_first_step_starts_right_away() {
+        let mut m = timed(&[]);
+        add_step(&mut m);
+        assert_eq!(times(&m), vec![0]);
     }
 }

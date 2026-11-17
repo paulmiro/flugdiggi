@@ -9,11 +9,11 @@ use gpui_kit::*;
 
 use crate::app::FlugApp;
 use crate::model::{
-    self, BUTTONS, EVENT_LEFT_STICK, EVENT_PRESS, EVENT_RELEASE, EVENT_RIGHT_STICK, MAX_MACROS, STICK_DIRECTIONS,
-    TARGETS, WAIT_SNAPS, key_label, macro_button, macro_steps_free,
+    self, BUTTONS, EVENT_LEFT_STICK, EVENT_PRESS, EVENT_RELEASE, EVENT_RIGHT_STICK, MAX_MACROS, PAUSE_SNAPS,
+    STICK_DIRECTIONS, TARGETS, WAIT_SNAPS, key_label, macro_button, macro_steps_free, stick_direction_hue,
 };
 use crate::theme::Colors;
-use crate::widgets::{byte, card, heading, note, row, segmented, slider_row};
+use crate::widgets::{byte, card, heading, note, row, segmented};
 
 const MODES: [&str; 3] = ["Once", "Repeat while held", "Toggle repeat"];
 const ACTIONS: [&str; 4] = ["Press", "Release", "Left stick", "Right stick"];
@@ -60,12 +60,21 @@ fn is_stick(event: u8) -> bool {
     matches!(event, EVENT_LEFT_STICK | EVENT_RIGHT_STICK)
 }
 
-/// Bars of the timeline: (row label, start ms, end ms).
-fn timeline_bars(m: &Macro) -> (Vec<String>, Vec<(usize, u32, u32)>, u32) {
+/// Colour of a stick direction; `None` for the centre.
+fn direction_color(key: &str) -> Option<Hsla> {
+    stick_direction_hue(key).map(|h| hsla(h, 0.85, 0.55, 1.0))
+}
+
+/// A timeline bar: its row, start and end in ms, and the stick direction's colour.
+type Bar = (usize, u32, u32, Option<Hsla>);
+
+/// Rows and bars of the timeline. A stick holds its direction until the next step for that stick; centring
+/// it only ends the bar.
+fn timeline_bars(m: &Macro) -> (Vec<String>, Vec<Bar>, u32) {
     let end = m.steps.iter().map(|s| s.at_ms).max().unwrap_or(0).max(10);
     let mut labels: Vec<String> = Vec::new();
     let mut bars = Vec::new();
-    let mut open: Vec<(String, u32)> = Vec::new();
+    let mut open: Vec<(String, u32, Option<Hsla>)> = Vec::new();
     let row_of = |label: String, labels: &mut Vec<String>| {
         labels.iter().position(|l| *l == label).unwrap_or_else(|| {
             labels.push(label);
@@ -80,20 +89,21 @@ fn timeline_bars(m: &Macro) -> (Vec<String>, Vec<(usize, u32, u32)>, u32) {
             EVENT_RIGHT_STICK => "Right stick".to_owned(),
             _ => key_label(&s.key),
         };
-        if let Some(i) = open.iter().position(|(l, _)| *l == label) {
-            let (l, start) = open.remove(i);
+        if let Some(i) = open.iter().position(|(l, _, _)| *l == label) {
+            let (l, start, color) = open.remove(i);
             let r = row_of(l, &mut labels);
-            bars.push((r, start, s.at_ms));
+            bars.push((r, start, s.at_ms, color));
         }
-        let starts = s.event == EVENT_PRESS || (is_stick(s.event) && s.key != "stick_center");
+        let stick = is_stick(s.event);
+        let starts = s.event == EVENT_PRESS || (stick && s.key != "stick_center");
         if starts {
             row_of(label.clone(), &mut labels);
-            open.push((label, s.at_ms));
+            open.push((label, s.at_ms, if stick { direction_color(&s.key) } else { None }));
         }
     }
-    for (l, start) in open {
+    for (l, start, color) in open {
         let r = row_of(l, &mut labels);
-        bars.push((r, start, end));
+        bars.push((r, start, end, color));
     }
     (labels, bars, end)
 }
@@ -146,27 +156,37 @@ impl FlugApp {
             .when(!narrow, |l| l.w(px(260.)).flex_shrink_0())
             .gap_2()
             .child(heading("Macros"))
-            .child(card(cx).p_1().children(items))
-            .child(note(
-                "A macro runs when the button it is applied to is pressed. Apply it here or in the Buttons page's mapping menu.",
-                cx,
-            ));
+            .child(card(cx).p_1().children(items));
 
         let m = macro_of(sel);
         let applied = macro_button(&d.config, sel);
         let free = macro_steps_free(&d.config, sel);
         let interval = d.config.macros.intervals_ms.get(sel).copied().unwrap_or(0);
-        let pause = self.slider(
-            format!("macro-pause-{sel}"),
-            (0.0, 255.0),
-            f32::from(interval / 10),
-            move |a, v| {
-                a.edit_silent(|d| {
-                    if let Some(i) = d.config.macros.intervals_ms.get_mut(sel) {
-                        *i = u16::from(byte(v)).saturating_mul(10);
-                    }
-                });
+        let set_pause = move |a: &mut FlugApp, ms: u32| {
+            let ms = ms.min(2550);
+            let ms = u16::try_from(ms.saturating_sub(ms.checked_rem(10).unwrap_or(0))).unwrap_or(0);
+            a.edit_silent(|d| {
+                if let Some(i) = d.config.macros.intervals_ms.get_mut(sel) {
+                    *i = ms;
+                }
+            });
+        };
+        let pause_input = self.input(
+            format!("macro-pause-input-{sel}"),
+            &interval.to_string(),
+            move |a, text| {
+                if let Ok(ms) = text.trim().parse::<u32>() {
+                    set_pause(a, ms);
+                }
             },
+            window,
+            cx,
+        );
+        let pause_slider = self.slider(
+            format!("macro-pause-{sel}"),
+            (0.0, f32::from(u8::try_from(PAUSE_SNAPS.len().saturating_sub(1)).unwrap_or(0))),
+            f32::from(u8::try_from(model::nearest_snap(&PAUSE_SNAPS, u32::from(interval))).unwrap_or(0)),
+            move |a, v| set_pause(a, PAUSE_SNAPS.get(usize::from(byte(v))).copied().unwrap_or(0)),
             window,
             cx,
         );
@@ -220,7 +240,7 @@ impl FlugApp {
                     .h(px(20.))
                     .child(div().w(px(80.)).text_xs().text_color(muted).child(label.clone()))
                     .child(div().flex_1().h_full().relative().bg(cx.theme().background).rounded(px(4.)).children(
-                        bars.iter().filter(|(row, _, _)| *row == r).map(|&(_, s, e)| {
+                        bars.iter().filter(|(row, _, _, _)| *row == r).map(|&(_, s, e, color)| {
                             let (s, e) = (frac(s), frac(e));
                             div()
                                 .absolute()
@@ -229,7 +249,7 @@ impl FlugApp {
                                 .left(relative(s))
                                 .w(relative((e - s).max(0.01)))
                                 .rounded(px(4.))
-                                .bg(Colors::edited().opacity(0.7))
+                                .bg(color.unwrap_or_else(Colors::edited).opacity(0.7))
                         }),
                     ))
             }))
@@ -264,7 +284,7 @@ impl FlugApp {
             let wait_slider = self.slider(
                 format!("step-wait-slider-{sel}-{i}"),
                 (0.0, f32::from(u8::try_from(snaps).unwrap_or(0))),
-                f32::from(u8::try_from(model::nearest_snap(wait)).unwrap_or(0)),
+                f32::from(u8::try_from(model::nearest_snap(&WAIT_SNAPS, wait)).unwrap_or(0)),
                 move |a, v| {
                     let ms = WAIT_SNAPS.get(usize::from(byte(v))).copied().unwrap_or(0);
                     a.edit_silent(|d| {
@@ -285,20 +305,31 @@ impl FlugApp {
                     .label(key_label(&s.key))
                     .dropdown_caret(true)
                     .dropdown_menu(move |menu, _, _| {
-                        keys.iter().fold(menu.max_h(px(400.)).scrollable(true), |menu, &k| {
+                        let menu = if stick { menu } else { menu.max_h(px(400.)).scrollable(true) };
+                        keys.iter().fold(menu, |menu, &k| {
                             let this = this.clone();
-                            menu.item(PopupMenuItem::new(key_label(k)).checked(current == k).on_click(
-                                move |_, _, cx| {
-                                    this.update(cx, |a, cx| {
-                                        a.edit_macro(cx, sel, |m| {
-                                            if let Some(step) = m.steps.get_mut(i) {
-                                                k.clone_into(&mut step.key);
-                                            }
-                                        });
-                                    })
-                                    .ok();
-                                },
-                            ))
+                            let item = if stick {
+                                PopupMenuItem::element(move |_, _| {
+                                    h_flex()
+                                        .gap_2()
+                                        .child(
+                                            div().size(px(8.)).rounded_full().when_some(direction_color(k), Styled::bg),
+                                        )
+                                        .child(key_label(k))
+                                })
+                            } else {
+                                PopupMenuItem::new(key_label(k))
+                            };
+                            menu.item(item.checked(current == k).on_click(move |_, _, cx| {
+                                this.update(cx, |a, cx| {
+                                    a.edit_macro(cx, sel, |m| {
+                                        if let Some(step) = m.steps.get_mut(i) {
+                                            k.clone_into(&mut step.key);
+                                        }
+                                    });
+                                })
+                                .ok();
+                            }))
                         })
                     })
             };
@@ -413,7 +444,16 @@ impl FlugApp {
                         cx,
                     ))
                     .when(m.mode >= 2, |c| {
-                        c.child(slider_row("Pause between repeats", &pause, format!("{interval} ms"), false, cx))
+                        c.child(row(
+                            "Pause between repeats",
+                            None,
+                            h_flex()
+                                .gap_2()
+                                .child(div().w(px(72.)).child(Input::new(&pause_input).small()))
+                                .child(div().text_xs().text_color(muted).child("ms"))
+                                .child(div().w(px(160.)).px_2().child(Slider::new(&pause_slider))),
+                            cx,
+                        ))
                     }),
             )
             .child(heading("Timeline").mt_2())
