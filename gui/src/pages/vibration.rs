@@ -81,7 +81,7 @@ impl FlugApp {
                 .child(
                     row(
                         "Rumble",
-                        Some("The two motors in the grips. When off, the controller ignores rumble from games."),
+                        None,
                         Switch::new("rumble-on").checked(on).on_click(cx.listener(|a, v: &bool, _, cx| {
                             let v = *v;
                             a.edit(cx, |d| d.config.rumble.enabled = v);

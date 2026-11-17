@@ -115,7 +115,7 @@ impl FlugApp {
                     )
                     .border_t_0(),
                 )
-                .child(row("Turn on with", None, enable_menu, cx).when(off, |r| r.opacity(0.4)))
+                .child(row("Button", None, enable_menu, cx).when(off, |r| r.opacity(0.4)))
                 .child(
                     row(
                         "Button mode",
@@ -132,14 +132,14 @@ impl FlugApp {
                 )
                 .child(
                     row(
-                        "Use",
+                        "Motion Type",
                         Some(
-                            "Shooting: turning the controller moves the camera (with the right stick or mouse). \
-                             Racing: tilting it steers like a wheel (with the left stick).",
+                            "Aiming: turning the controller moves the camera.\n\
+                             Steering Wheel: tilting it steers like a wheel.",
                         ),
                         segmented(
                             "motion-use",
-                            &["Shooting", "Racing"],
+                            &["Aiming", "Steering Wheel"],
                             Some(usize::from(m.use_mode.min(1))),
                             pick(|m, v| m.use_mode = v),
                         ),
@@ -153,9 +153,9 @@ impl FlugApp {
             .child(heading("Response"))
             .child(
                 card(cx)
-                    .child(slider_row("Deadzone", &deadzone, m.deadzone.to_string(), off, cx).border_t_0())
-                    .child(slider_row("Horizontal sensitivity", &sens_x, m.sensitivity_x.to_string(), off, cx))
-                    .child(slider_row("Vertical sensitivity", &sens_y, m.sensitivity_y.to_string(), off, cx))
+                    .child(slider_row("Deadzone", &deadzone, format!("{} / 100", m.deadzone), off, cx).border_t_0())
+                    .child(slider_row("Horizontal sensitivity", &sens_x, format!("{} / 100", m.sensitivity_x), off, cx))
+                    .child(slider_row("Vertical sensitivity", &sens_y, format!("{} / 100", m.sensitivity_y), off, cx))
                     .child(advanced_toggle)
                     .child(
                         CollapsibleView::new().open(advanced_open).motion_id("adv-motion").content(
@@ -167,7 +167,7 @@ impl FlugApp {
                                     slider_row(
                                         smooth_names.get(i).copied().unwrap_or("Smoothing"),
                                         s,
-                                        v.to_string(),
+                                        format!("{v} / 127"),
                                         false,
                                         cx,
                                     )

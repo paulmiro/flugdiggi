@@ -33,11 +33,11 @@ pub fn row(label: impl Into<SharedString>, sub: Option<&str>, control: impl Into
         .border_color(Colors::line())
         .text_sm()
         .child(
-            v_flex()
-                .flex_1()
-                .min_w_0()
-                .child(label.into())
-                .children(sub.map(|s| div().text_xs().text_color(cx.theme().muted_foreground).child(s.to_owned()))),
+            v_flex().flex_1().min_w_0().child(label.into()).children(
+                sub.into_iter()
+                    .flat_map(str::lines)
+                    .map(|s| div().text_xs().text_color(cx.theme().muted_foreground).child(s.to_owned())),
+            ),
         )
         .child(div().flex_shrink_0().child(control))
 }
