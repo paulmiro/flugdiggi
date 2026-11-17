@@ -410,7 +410,7 @@ impl FlugApp {
                     ),
             );
         }
-        let clearable = !m.steps.is_empty() || applied.is_some();
+        let clearable = !m.steps.is_empty();
 
         let right = v_flex()
             .flex_1()

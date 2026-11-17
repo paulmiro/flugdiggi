@@ -436,9 +436,8 @@ pub fn apply_macro(config: &mut Config, index: usize, button: &str) {
     trim_macros(config);
 }
 
-/// Empties macro `index` and takes it off its button.
+/// Empties macro `index`. It stays on its button.
 pub fn clear_macro(config: &mut Config, index: usize) {
-    unapply_macro(config, index);
     if let Some(m) = config.macros.list.get_mut(index) {
         m.steps.clear();
         m.mode = 1;
@@ -648,10 +647,19 @@ mod tests {
     fn clearing_removes_steps_and_trailing_records() {
         let (mut c, _) = base();
         edit_macro(&mut c, 1, |m| m.steps.push(step(0)));
-        apply_macro(&mut c, 1, "x");
         clear_macro(&mut c, 1);
         assert_eq!(c.macros.list.len(), 0);
-        assert!(c.buttons.get("x").is_none());
+    }
+
+    #[test]
+    fn clearing_keeps_the_macro_on_its_button() {
+        let (mut c, b) = base();
+        edit_macro(&mut c, 1, |m| m.steps.push(step(0)));
+        apply_macro(&mut c, 1, "x");
+        clear_macro(&mut c, 1);
+        assert_eq!(macro_button(&c, 1), Some("x"));
+        assert_eq!(c.macros.list.get(1).map(|m| m.steps.len()), Some(0));
+        assert_eq!(stored(&c, &b).buttons.get("x").map(String::as_str), Some("macro"));
     }
 
     #[test]
