@@ -13,7 +13,7 @@ use gpui_kit::component::{ActiveTheme, Collapsible, Icon, IconName, Sizable, h_f
 use gpui_kit::*;
 
 use crate::app::FlugApp;
-use crate::model::{LED_ORDER, SlotData, led_color, parse_hex};
+use crate::model::{LED_ORDER, SlotData, display_name, led_color, parse_hex};
 use crate::theme::Colors;
 
 type Handler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -276,7 +276,7 @@ pub fn render(app: &FlugApp, cx: &mut Context<FlugApp>) -> impl IntoElement {
             let name = match d {
                 None => "Not loaded".to_owned(),
                 Some(d) if d.config.name.trim().is_empty() => "Unnamed".to_owned(),
-                Some(d) => d.config.name.clone(),
+                Some(d) => display_name(&d.config.name).to_owned(),
             };
             let active = loaded.active.slot.get() == number;
             let on_activate: Option<(Activate, bool)> = (i < 4).then(|| {

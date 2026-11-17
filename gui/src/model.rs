@@ -195,6 +195,19 @@ pub fn preset_name(id: u8) -> &'static str {
     PRESETS.iter().find(|(i, _)| *i == id).map_or("Custom", |(_, n)| n)
 }
 
+/// English names the official app shows for the factory configs, keyed by the name stored on the controller.
+const FACTORY_NAMES: [(&str, &str); 4] = [
+    ("常规游戏配置", "Regular"),
+    ("枪战游戏配置", "Shooting"),
+    ("赛车游戏配置", "Racing"),
+    ("格斗游戏配置", "Fighting"),
+];
+
+/// The name to show for a slot. Factory names are translated; the stored name is not changed.
+pub fn display_name(name: &str) -> &str {
+    FACTORY_NAMES.iter().find(|(stored, _)| *stored == name).map_or(name, |(_, shown)| shown)
+}
+
 fn fill(led: &mut Led, frames: &[[String; 5]]) {
     for (f, colors) in frames.iter().enumerate() {
         for (pos, c) in LED_ORDER.iter().zip(colors) {
@@ -547,6 +560,13 @@ pub fn add_step(m: &mut Macro) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn factory_names_are_translated_for_display() {
+        assert_eq!(display_name("格斗游戏配置"), "Fighting");
+        assert_eq!(display_name("Gyro"), "Gyro");
+        assert_eq!(display_name("格斗"), "格斗");
+    }
 
     fn blob() -> Vec<u8> {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../core/testdata");

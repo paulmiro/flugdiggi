@@ -6,6 +6,7 @@ use gpui_kit::component::{ActiveTheme, Sizable, v_flex};
 use gpui_kit::*;
 
 use crate::app::FlugApp;
+use crate::model::display_name;
 use crate::widgets::{card, columns, heading, row};
 
 /// Longest name the controller stores, in UTF-16 units.
@@ -17,7 +18,7 @@ impl FlugApp {
         let Some(loaded) = self.loaded().cloned() else { return div().into_any_element() };
         let name = self.input(
             "slot-name",
-            &d.config.name,
+            display_name(&d.config.name),
             |a, text| {
                 let name: String = text
                     .chars()
