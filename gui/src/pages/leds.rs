@@ -108,10 +108,10 @@ fn strip_color(colors: &[Hsla; 5], u: f32) -> Hsla {
 
 /// The LED strip: a V with arms 100 degrees apart and a rounded tip.
 ///
-/// The shape follows a centre line (left arm, circular arc, right arm); both edges are offset from it by
-/// half the band width, so the tip is rounded on the inside and the outside. It is filled as thin slices
-/// along that line, each in the colour at its position, which gives a smooth gradient around the bend.
-/// The slices overlap slightly so no seams show between them.
+/// Each edge is a V of its own, offset from the centre line by half the band width, with its corner rounded
+/// to the same radius on the inside and the outside. The band is filled as thin slices across it, each in the
+/// colour at its position, which gives a smooth gradient around the bend. A slice joins the points at the same
+/// fraction of each edge's arm or arc. The slices overlap slightly so no seams show between them.
 fn preview(colors: [Hsla; 5]) -> impl IntoElement {
     const HALF: f32 = 9.0;
     const RADIUS: f32 = 13.0;
@@ -122,37 +122,39 @@ fn preview(colors: [Hsla; 5]) -> impl IntoElement {
         |_, _, _| {},
         move |bounds, (), window, _| {
             let (sin, cos) = 50f32.to_radians().sin_cos();
+            let cot = cos / sin;
             let (x0, y0) = (bounds.origin.x.as_f32(), bounds.origin.y.as_f32());
             let (w, h) = (bounds.size.width.as_f32(), bounds.size.height.as_f32());
             // P is where the arms' centre lines would meet. The outer edge of the tip lies `below` P, the
             // arms' top ends `above(l)` it for arms of length `l` (measured to P).
-            let below = RADIUS + HALF - RADIUS / sin;
+            let below = HALF / sin - RADIUS / sin + RADIUS;
             let above = |l: f32| l * cos + HALF * sin;
             let l_w = (w / 2.0 - MARGIN - HALF * cos) / sin;
             let l_h = (h - 2.0 * MARGIN - below - HALF * sin) / cos;
-            let l = l_w.min(l_h).max(RADIUS);
+            let l = l_w.min(l_h).max(2.0 * (HALF + RADIUS) * cot);
             let (px_, py) = (x0 + w / 2.0, y0 + (h + above(l) - below) / 2.0);
-            let straight = l - RADIUS * cos / sin;
+            // Straight lengths of the outer and inner edge and of the centre line, which sets the slice spacing.
+            let (outer_len, inner_len) = (l + (HALF - RADIUS) * cot, l - (HALF + RADIUS) * cot);
+            let straight = l - RADIUS * cot;
             let arc = RADIUS * 80f32.to_radians();
             let total = 2.0 * straight + arc;
+            // Top end of the left arm on the centre line, and each edge's arc centre (side 1 = outer, -1 = inner).
             let (ax, ay) = (px_ - l * sin, py - l * cos);
-            let (cx_, cy_) = (px_, py - RADIUS / sin);
-            // Point on the centre line `s` along it, and the outward normal there.
-            let at = |s: f32| -> ((f32, f32), (f32, f32)) {
-                if s <= straight {
-                    ((ax + sin * s, ay + cos * s), (-cos, sin))
-                } else if s <= straight + arc {
-                    let psi = 130f32.to_radians() - (s - straight) / RADIUS;
-                    let (sn, cs) = psi.sin_cos();
-                    ((cx_ + RADIUS * cs, cy_ + RADIUS * sn), (cs, sn))
-                } else {
-                    let d = s - straight - arc;
-                    ((cx_ + RADIUS * cos + sin * d, cy_ + RADIUS * sin - cos * d), (cos, sin))
-                }
-            };
+            let centre_y = |side: f32| py + side * HALF / sin - RADIUS / sin;
             let edge = |s: f32, side: f32| {
-                let ((x, y), (nx, ny)) = at(s);
-                point(px(x + nx * HALF * side), px(y + ny * HALF * side))
+                let len = if side > 0.0 { outer_len } else { inner_len };
+                let cy_ = centre_y(side);
+                let (x, y) = if s <= straight {
+                    let d = s / straight * len;
+                    (ax - cos * HALF * side + sin * d, ay + sin * HALF * side + cos * d)
+                } else if s <= straight + arc {
+                    let (sn, cs) = (130f32.to_radians() - (s - straight) / RADIUS).sin_cos();
+                    (px_ + RADIUS * cs, cy_ + RADIUS * sn)
+                } else {
+                    let d = (s - straight - arc) / straight * len;
+                    (px_ + RADIUS * cos + sin * d, cy_ + RADIUS * sin - cos * d)
+                };
+                point(px(x), px(y))
             };
             let n = f32::from(SLICES);
             for i in 0..SLICES {
@@ -209,7 +211,8 @@ impl FlugApp {
 
         let brightness = self.slider(
             "led-bright",
-            (1.0, 100.0),
+            // At 1 the red LEDs go dark (seen on a Vader 4 Pro), so 2 is the lowest offered.
+            (2.0, 100.0),
             f32::from(led.brightness),
             |a, v| {
                 a.edit_silent(|d| d.led.brightness = byte(v));
