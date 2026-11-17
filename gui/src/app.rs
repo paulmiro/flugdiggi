@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use crate::prelude::*;
 use color_eyre::Result;
 use flugdiggi_core::{DeviceSummary, Slot, UsbPort};
+use gpui_kit::component::Selectable as _;
 use gpui_kit::component::alert::Alert;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::color_picker::ColorPickerState;
@@ -18,7 +19,7 @@ use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::component::progress::Progress;
 use gpui_kit::component::slider::{SliderEvent, SliderState};
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::tab::{Tab, TabBar};
+use gpui_kit::component::tab::Tab;
 use gpui_kit::component::{ActiveTheme, IconName, Sizable, TitleBar, WindowExt, h_flex, v_flex};
 use gpui_kit::*;
 use tracing::{error, info, warn};
@@ -83,15 +84,12 @@ pub struct FlugApp {
     advanced: std::collections::HashSet<String>,
     /// Too narrow for two columns of settings side by side.
     pub narrow: bool,
-    /// Room in the header for the unsaved-changes text next to the tabs.
-    wide_header: bool,
     _poll: Task<()>,
 }
 
 const POLL: Duration = Duration::from_secs(3);
-/// Window widths from which pages show two columns, and the header shows the unsaved-changes text.
+/// Window width from which pages show two columns.
 const TWO_COLUMNS_WIDTH: f32 = 1140.;
-const STATUS_WIDTH: f32 = 1300.;
 
 impl FlugApp {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -137,7 +135,6 @@ impl FlugApp {
             led_anim_done: false,
             advanced: std::collections::HashSet::new(),
             narrow: false,
-            wide_header: true,
             _poll: poll,
         }
     }
@@ -606,12 +603,27 @@ impl FlugApp {
         cx.open_with_system(&dir);
     }
 
+    /// The page tabs, in a row below the title bar that wraps when the window is narrow.
+    fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex().flex_wrap().gap_1().px_3().py_1p5().border_b_1().border_color(Colors::line()).children(
+            Page::ALL.iter().enumerate().map(|(i, &p)| {
+                div().id(("page-tab", i)).child(
+                    Tab::new().pill().small().label(p.label()).selected(p == self.page).on_click(cx.listener(
+                        move |this, _, _, cx| {
+                            this.page = p;
+                            this.picker = None;
+                            cx.notify();
+                        },
+                    )),
+                )
+            }),
+        )
+    }
+
     fn render_header(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let changes = self.current().map_or(0, SlotData::changes);
         let busy = self.busy.as_ref().map(|b| b.label.clone());
-        let selected = Page::ALL.iter().position(|p| *p == self.page).unwrap_or(0);
         let has_data = self.current().is_some();
-        let show_status = self.wide_header || busy.is_some();
         let this = cx.entity().downgrade();
         let status = match (&busy, changes) {
             (Some(label), _) => h_flex().gap_2().child(Spinner::new().small()).child(label.clone()).into_any_element(),
@@ -636,32 +648,20 @@ impl FlugApp {
             .child(
                 h_flex()
                     .flex_1()
+                    .min_w_0()
                     .h_full()
                     .pr_2()
                     .gap_2()
-                    .when(has_data, |d| {
-                        d.child(
-                            div().flex_1().min_w_0().child(
-                                TabBar::new("pages")
-                                    .pill()
-                                    .small()
-                                    .menu(true)
-                                    .selected_index(selected)
-                                    .children(Page::ALL.iter().map(|p| Tab::new().label(p.label())))
-                                    .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                                        if let Some(p) = Page::ALL.get(*ix) {
-                                            this.page = *p;
-                                            this.picker = None;
-                                            cx.notify();
-                                        }
-                                    })),
-                            ),
-                        )
-                    })
-                    .when(!has_data, |d| d.child(div().flex_1()))
-                    .when(show_status, |d| {
-                        d.child(div().flex_shrink_0().text_sm().text_color(cx.theme().muted_foreground).child(status))
-                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(status),
+                    )
                     .when(has_data, |d| {
                         d.child(
                             Button::new("discard")
@@ -787,7 +787,6 @@ impl Render for FlugApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let width = window.viewport_size().width;
         self.narrow = width < px(TWO_COLUMNS_WIDTH);
-        self.wide_header = width >= px(STATUS_WIDTH);
         let error = self.error.clone();
         h_flex()
             .size_full()
@@ -800,6 +799,7 @@ impl Render for FlugApp {
                     .min_w_0()
                     .h_full()
                     .child(self.render_header(cx))
+                    .when(self.current().is_some(), |this| this.child(self.render_tabs(cx)))
                     .when_some(error, |this, e| {
                         this.child(div().px_5().pt_3().child(Alert::error("error", e).on_close(cx.listener(
                             |this, _, _, cx| {
