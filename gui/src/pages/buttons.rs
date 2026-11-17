@@ -125,36 +125,28 @@ impl FlugApp {
                     })
                 }
             };
-            let mapped = h_flex()
+            let mapped = Button::new(("map", i))
                 .w(px(170.))
-                .gap_1()
-                .child(
-                    Button::new(("map", i))
-                        .w(px(if has_macro { 136. } else { 170. }))
-                        .small()
-                        .label(map_label)
-                        .dropdown_caret(true)
-                        .when(mapping.is_none() && !has_macro, |b| b.text_color(muted))
-                        .dropdown_menu(map_menu),
-                )
-                .when(has_macro, |row| {
-                    row.child(
-                        Button::new(("edit-macro", i))
-                            .small()
-                            .icon(Icon::new(gpui_kit::assets::IconName::Pencil))
-                            .tooltip("Edit macro")
-                            .on_click(cx.listener(move |app, _, _, cx| {
-                                if let Some(m) = app.current().and_then(|d| macro_on_button(&d.config, button)) {
-                                    app.macro_sel = m;
-                                }
-                                app.page = Page::Macros;
-                                cx.notify();
-                            })),
-                    )
-                });
+                .small()
+                .label(map_label)
+                .dropdown_caret(true)
+                .when(mapping.is_none() && !has_macro, |b| b.text_color(muted))
+                .dropdown_menu(map_menu);
 
             let turbo_cell = if has_macro {
-                div().w(px(140.)).into_any_element()
+                Button::new(("edit-macro", i))
+                    .w(px(140.))
+                    .small()
+                    .icon(Icon::new(gpui_kit::assets::IconName::Pencil))
+                    .label("Edit macro")
+                    .on_click(cx.listener(move |app, _, _, cx| {
+                        if let Some(m) = app.current().and_then(|d| macro_on_button(&d.config, button)) {
+                            app.macro_sel = m;
+                        }
+                        app.page = Page::Macros;
+                        cx.notify();
+                    }))
+                    .into_any_element()
             } else {
                 let this = this.clone();
                 let rate = rate.clone();
@@ -221,7 +213,7 @@ impl FlugApp {
                     .min_h(px(38.))
                     .px_2p5()
                     .gap_2p5()
-                    .when(i % 11 != 0, |r| r.border_t_1().border_color(Colors::line()))
+                    .when(i != 0 && (self.narrow || i != 11), |r| r.border_t_1().border_color(Colors::line()))
                     .child(
                         div()
                             .w(px(48.))
@@ -261,7 +253,6 @@ impl FlugApp {
                     .into_any_element(),
             );
         }
-        let mut second = rows.split_off(11);
         let column = |rows: Vec<AnyElement>, cx: &App| {
             v_flex()
                 .flex_1()
@@ -280,6 +271,10 @@ impl FlugApp {
                 )
                 .child(card(cx).children(rows))
         };
+        if self.narrow {
+            return column(rows, cx).into_any_element();
+        }
+        let mut second = rows.split_off(11);
         second.truncate(11);
         columns(column(rows, cx), column(second, cx), self.narrow).into_any_element()
     }
