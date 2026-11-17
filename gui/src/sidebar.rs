@@ -113,7 +113,7 @@ impl Rows {
                         div()
                             .id(child_id(format!("bat{i}")))
                             .text_color(color.unwrap_or(muted))
-                            .child(Icon::new(icon).size_7())
+                            .child(Icon::new(icon).size_5())
                             .tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx))
                     });
                     row_base(child_id(format!("c{i}")), r.selected, r.on_click, cx).child(
@@ -145,14 +145,15 @@ impl Rows {
                                 "Make the controller use this slot now"
                             })
                             .on_click(move |_, w, cx| {
-                                cx.stop_propagation();
                                 if !active {
                                     on_activate(w, cx);
                                 }
                             })
                     });
                     let has_radio = activate.is_some();
-                    row_base(child_id(format!("s{}", r.number)), r.selected, r.on_click, cx).child(
+                    // The radio sits beside the row rather than inside it, so the two click targets don't overlap.
+                    // Rows without one keep the space, so all slot rows line up.
+                    let row = row_base(child_id(format!("s{}", r.number)), r.selected, r.on_click, cx).child(
                         v_flex()
                             .gap_1p5()
                             .child(
@@ -172,15 +173,18 @@ impl Rows {
                                     .when(r.edited, |d| d.child(div().size(px(6.)).rounded_full().bg(Colors::edited())))
                                     .when(r.active && !has_radio, |d| {
                                         d.child(div().text_xs().font_semibold().text_color(muted).child("ACTIVE"))
-                                    })
-                                    .children(activate),
+                                    }),
                             )
                             .child(
                                 h_flex().ml(px(30.)).h(px(4.)).gap(px(2.)).children(
                                     r.leds.into_iter().map(|c| div().flex_1().h_full().rounded(px(2.)).bg(c)),
                                 ),
                             ),
-                    )
+                    );
+                    h_flex()
+                        .gap_1()
+                        .child(div().flex_1().min_w_0().child(row))
+                        .child(div().w(px(22.)).flex().justify_center().children(activate))
                 }))
                 .into_any_element(),
         }
