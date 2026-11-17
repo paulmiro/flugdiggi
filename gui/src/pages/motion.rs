@@ -7,7 +7,12 @@ use gpui_kit::*;
 
 use crate::app::FlugApp;
 use crate::model::{BUTTONS, key_label};
-use crate::widgets::{byte, card, columns, heading, note, row, segmented, slider_row, subheading};
+use crate::widgets::{byte, card, columns, heading, note, row, segmented, slider_row, slider_row_sub, subheading};
+
+/// Gyro mapped to the mouse.
+const MAP_MOUSE: u8 = 3;
+/// Deadzone compensation the official app uses when none is set.
+const DEFAULT_DEADZONE: u8 = 15;
 
 impl FlugApp {
     fn key_menu(
@@ -109,7 +114,16 @@ impl FlugApp {
                             "motion-map",
                             &["Off", "Left stick", "Right stick", "Mouse"],
                             Some(usize::from(m.map_to.min(3))),
-                            pick(|m, v| m.map_to = v),
+                            // Like the official app: the mouse has no deadzone compensation (written as 0), and
+                            // leaving mouse mode starts from the default again.
+                            pick(|m, v| {
+                                if v == MAP_MOUSE {
+                                    m.deadzone = 0;
+                                } else if m.map_to == MAP_MOUSE && m.deadzone == 0 {
+                                    m.deadzone = DEFAULT_DEADZONE;
+                                }
+                                m.map_to = v;
+                            }),
                         ),
                         cx,
                     )
@@ -153,7 +167,22 @@ impl FlugApp {
             .child(heading("Response"))
             .child(
                 card(cx)
-                    .child(slider_row("Deadzone", &deadzone, format!("{} / 100", m.deadzone), off, cx).border_t_0())
+                    .child(
+                        slider_row_sub(
+                            "Deadzone compensation",
+                            Some(if m.map_to == MAP_MOUSE {
+                                "Only used when the gyro acts as a stick."
+                            } else {
+                                "Counters the game's own stick deadzone so small movements register. \
+                                 0 suits games where that deadzone can be turned off."
+                            }),
+                            &deadzone,
+                            format!("{} / 100", m.deadzone),
+                            off || m.map_to == MAP_MOUSE,
+                            cx,
+                        )
+                        .border_t_0(),
+                    )
                     .child(slider_row("Horizontal sensitivity", &sens_x, format!("{} / 100", m.sensitivity_x), off, cx))
                     .child(slider_row("Vertical sensitivity", &sens_y, format!("{} / 100", m.sensitivity_y), off, cx))
                     .child(advanced_toggle)
