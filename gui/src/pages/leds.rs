@@ -4,9 +4,9 @@ use crate::prelude::*;
 use flugdiggi_core::led::Led;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::collapsible::Collapsible as CollapsibleView;
-use gpui_kit::component::color_picker::{ColorPickerEvent, ColorPickerState, ColorSelect};
+use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
-use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, Size, h_flex, v_flex};
 use gpui_kit::*;
 
 use crate::app::FlugApp;
@@ -26,16 +26,6 @@ fn hsla_hex(c: Hsla) -> String {
     let c = Rgba::from(c);
     let [r, g, b] = [c.r, c.g, c.b].map(|v| unit_to_u8(v * 255.0));
     format!("#{r:02x}{g:02x}{b:02x}")
-}
-
-fn pos_name(pos: LedPos) -> &'static str {
-    match pos {
-        LedPos::TopLeft => "top left",
-        LedPos::MiddleLeft => "middle left",
-        LedPos::Bottom => "bottom",
-        LedPos::MiddleRight => "middle right",
-        LedPos::TopRight => "top right",
-    }
 }
 
 /// Inserts a copy of `frame` after it; the last stored frame drops off.
@@ -105,54 +95,84 @@ fn animation_frame(led: &Led, elapsed: Duration) -> ([Hsla; 5], bool) {
     )
 }
 
-/// The LED strip as a V. Each LED's colour holds near it and fades into its neighbours'.
+/// Colour `u` (0-1) along the strip: it holds near each LED and fades into the next one's.
+fn strip_color(colors: &[Hsla; 5], u: f32) -> Hsla {
+    let x = (u * 4.0).clamp(0.0, 4.0);
+    let k = x.floor().min(3.0);
+    let t = ((x - k - 0.3) / 0.4).clamp(0.0, 1.0);
+    let t = t * t * (3.0 - 2.0 * t);
+    let k = usize::from(unit_to_u8(k));
+    let a = colors.get(k).copied().unwrap_or_default();
+    mix(a, colors.get(k.saturating_add(1)).copied().unwrap_or(a), t)
+}
+
+/// The LED strip: a V with arms 100 degrees apart and a rounded tip.
+///
+/// The shape follows a centre line (left arm, circular arc, right arm); both edges are offset from it by
+/// half the band width, so the tip is rounded on the inside and the outside. It is filled as thin slices
+/// along that line, each in the colour at its position, which gives a smooth gradient around the bend.
+/// The slices overlap slightly so no seams show between them.
 fn preview(colors: [Hsla; 5]) -> impl IntoElement {
+    const HALF: f32 = 9.0;
+    const RADIUS: f32 = 13.0;
+    const SLICES: u16 = 160;
+    const OVERLAP: f32 = 0.8;
+    const MARGIN: f32 = 4.0;
     canvas(
         |_, _, _| {},
         move |bounds, (), window, _| {
+            let (sin, cos) = 50f32.to_radians().sin_cos();
             let (x0, y0) = (bounds.origin.x.as_f32(), bounds.origin.y.as_f32());
             let (w, h) = (bounds.size.width.as_f32(), bounds.size.height.as_f32());
-            let half = 6.0;
-            let (left, right, mid) = (x0 + w * 0.06, x0 + w * 0.94, x0 + w * 0.5);
-            let (top, bottom) = (y0 + h * 0.12, y0 + h * 0.88);
-            // Unit vector down the left arm; the right arm mirrors it.
-            let len = (mid - left).hypot(bottom - top).max(f32::EPSILON);
-            let (dx, dy) = ((mid - left) / len, (bottom - top) / len);
-            let center = |t: f32| (left + (right - left) * t, top + (bottom - top) * (1.0 - (t - 0.5).abs() * 2.0));
-            // A point on the band's outer (lower) or inner edge. At the tip both arms' edges meet on the
-            // middle line, so the V has no gap there.
-            let edge = |t: f32, outer: bool| {
-                let s = if outer { half } else { -half };
-                if (t - 0.5).abs() < 1e-4 {
-                    let (ox, oy) = (left - dy * s, top + dx * s);
-                    return point(px(mid), px(oy + (mid - ox) / dx * dy));
+            // P is where the arms' centre lines would meet. The outer edge of the tip lies `below` P, the
+            // arms' top ends `above(l)` it for arms of length `l` (measured to P).
+            let below = RADIUS + HALF - RADIUS / sin;
+            let above = |l: f32| l * cos + HALF * sin;
+            let l_w = (w / 2.0 - MARGIN - HALF * cos) / sin;
+            let l_h = (h - 2.0 * MARGIN - below - HALF * sin) / cos;
+            let l = l_w.min(l_h).max(RADIUS);
+            let (px_, py) = (x0 + w / 2.0, y0 + (h + above(l) - below) / 2.0);
+            let straight = l - RADIUS * cos / sin;
+            let arc = RADIUS * 80f32.to_radians();
+            let total = 2.0 * straight + arc;
+            let (ax, ay) = (px_ - l * sin, py - l * cos);
+            let (cx_, cy_) = (px_, py - RADIUS / sin);
+            // Point on the centre line `s` along it, and the outward normal there.
+            let at = |s: f32| -> ((f32, f32), (f32, f32)) {
+                if s <= straight {
+                    ((ax + sin * s, ay + cos * s), (-cos, sin))
+                } else if s <= straight + arc {
+                    let psi = 130f32.to_radians() - (s - straight) / RADIUS;
+                    let (sn, cs) = psi.sin_cos();
+                    ((cx_ + RADIUS * cs, cy_ + RADIUS * sn), (cs, sn))
+                } else {
+                    let d = s - straight - arc;
+                    ((cx_ + RADIUS * cos + sin * d, cy_ + RADIUS * sin - cos * d), (cos, sin))
                 }
-                let (cx, cy) = center(t);
-                let (nx, ny) = if t < 0.5 { (-dy, dx) } else { (dy, dx) };
-                point(px(cx + nx * s), px(cy + ny * s))
             };
-            let left_angle = dx.atan2(-dy).to_degrees().rem_euclid(360.0);
-            let right_angle = dx.atan2(dy).to_degrees().rem_euclid(360.0);
-            for k in 0..4u8 {
-                let (t0, t1) = (f32::from(k) / 4.0, f32::from(k.saturating_add(1)) / 4.0);
+            let edge = |s: f32, side: f32| {
+                let ((x, y), (nx, ny)) = at(s);
+                point(px(x + nx * HALF * side), px(y + ny * HALF * side))
+            };
+            let n = f32::from(SLICES);
+            for i in 0..SLICES {
+                let i = f32::from(i);
+                let s0 = total * i / n;
+                let s1 = (total * (i + 1.0) / n + OVERLAP).min(total);
                 let mut p = PathBuilder::fill();
-                p.move_to(edge(t0, true));
-                p.line_to(edge(t1, true));
-                p.line_to(edge(t1, false));
-                p.line_to(edge(t0, false));
+                p.move_to(edge(s0, 1.0));
+                p.line_to(edge(s1, 1.0));
+                p.line_to(edge(s1, -1.0));
+                p.line_to(edge(s0, -1.0));
                 p.close();
-                let a = colors.get(usize::from(k)).copied().unwrap_or_default();
-                let b = colors.get(usize::from(k.saturating_add(1))).copied().unwrap_or(a);
-                let angle = if k < 2 { left_angle } else { right_angle };
-                let bg = linear_gradient(angle, linear_color_stop(a, 0.3), linear_color_stop(b, 0.7));
                 if let Ok(path) = p.build() {
-                    window.paint_path(path, bg);
+                    window.paint_path(path, strip_color(&colors, (i + 0.5) / n));
                 }
             }
         },
     )
-    .w(px(360.))
-    .h(px(120.))
+    .w(px(300.))
+    .h(px(130.))
 }
 
 impl FlugApp {
@@ -270,7 +290,19 @@ impl FlugApp {
                         .rounded(px(6.))
                         .cursor_pointer()
                         .bg(hex_hsla(&color))
-                        .when(selected, |d| d.border_2().border_color(rgb(0x00ec_ecec)))
+                        .border_2()
+                        .border_color(if selected { rgb(0x00ec_ecec).into() } else { transparent_black() })
+                        // The picker's own trigger sits clipped away inside the picked tile, so its popup opens
+                        // right below the tile.
+                        .when(selected, |d| {
+                            d.relative().child(
+                                div().absolute().top_0().left_0().size_0().overflow_hidden().child(
+                                    ColorPicker::new(&color_state)
+                                        .featured_colors(palette.clone())
+                                        .with_size(Size::Size(px(32.))),
+                                ),
+                            )
+                        })
                         .drag_over::<DraggedColor>(|s, _, _, _| s.border_2().border_color(Colors::highlight()))
                         .on_drag(DraggedColor { color }, |d, _, _, cx| cx.new(|_| d.clone()))
                         .on_drop(cx.listener(move |a, dragged: &DraggedColor, _, cx| {
@@ -364,11 +396,16 @@ impl FlugApp {
         };
         let play_button = Button::new("led-play")
             .small()
-            .icon(Icon::new(if playing { gpui_kit::assets::IconName::Pause } else { gpui_kit::assets::IconName::Play }))
-            .label(if playing { "Pause" } else { "Play" })
+            .icon(Icon::new(if playing {
+                gpui_kit::assets::IconName::Square
+            } else {
+                gpui_kit::assets::IconName::Play
+            }))
+            .label(if playing { "Stop" } else { "Play" })
             .on_click(cx.listener(move |a, _, _, cx| {
                 if playing {
                     a.led_anim = None;
+                    a.led_frame = 0;
                     cx.notify();
                 } else {
                     a.play_leds(cx);
@@ -376,10 +413,6 @@ impl FlugApp {
             }));
         let step_ms = u32::from(led.step_time).saturating_mul(100);
         let advanced_open = self.advanced_open("leds");
-        let picked_label = self.picker.map_or_else(
-            || "Selected LED".to_owned(),
-            |(f, p)| format!("Frame {}, {} LED", f.saturating_add(1), pos_name(p)),
-        );
 
         let narrow = self.narrow;
         let layout = if narrow { v_flex() } else { h_flex().items_start() };
@@ -391,10 +424,13 @@ impl FlugApp {
                     .gap_2()
                     .child(h_flex().justify_between().child(heading("Frames")).child(frame_buttons))
                     .child(card(cx).p_3().child(grid))
-                    .child(div().text_xs().text_color(cx.theme().muted_foreground).px_0p5().child(format!(
-                        "Plays frames 1–{frames}, {step_ms} ms each. Click a tile to change its colour, \
-                                 drag it onto another tile to copy it there."
-                    ))),
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .px_0p5()
+                            .child("Click a tile to change its colour, drag it onto another tile to copy it there."),
+                    ),
             )
             .child(
                 v_flex()
@@ -404,11 +440,7 @@ impl FlugApp {
                     .child(heading("Effect"))
                     .child(
                         card(cx)
-                            .child(
-                                row(picked_label, None, ColorSelect::new(&color_state).featured_colors(palette), cx)
-                                    .border_t_0(),
-                            )
-                            .child(row("Preset", None, preset_button, cx))
+                            .child(row("Preset", None, preset_button, cx).border_t_0())
                             .child(row(
                                 "Plays",
                                 None,

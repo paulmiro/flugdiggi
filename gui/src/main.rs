@@ -29,10 +29,10 @@ gpui_kit::assets::icon_assets!(
         BatteryMedium,
         Gamepad2,
         GripVertical,
-        Pause,
         Pencil,
         Play,
-        RotateCcw
+        RotateCcw,
+        Square
     ]
 );
 
