@@ -1,6 +1,6 @@
 {
   "name": "flugdiggi-decky",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Decky Loader plugin to edit the button mapping of Flydigi Vader 4 controllers",
   "type": "module",
   "scripts": {
