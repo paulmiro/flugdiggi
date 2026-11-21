@@ -3,12 +3,12 @@ resolver = "3"
 members = ["core", "cli", "gui", "decky"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "Unlicense"
 
 [workspace.dependencies]
-flugdiggi-core = { version = "0.1.0", path = "core" }
+flugdiggi-core = { version = "0.1.1", path = "core" }
 
 anstream = "1.0.0"
 anstyle = "1.0.14"
