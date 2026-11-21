@@ -16,3 +16,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 toml.workspace = true
+
+[features]
+# Builds libusb from source and links it statically, for the Decky plugin's helper.
+vendored-libusb = ["rusb/vendored"]

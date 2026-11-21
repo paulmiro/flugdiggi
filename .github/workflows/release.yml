@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Decky plugins must work on NixOS too, so the helper is linked statically.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      # libusb without udev, which would have to be linked statically as well.
+      - env:
+          LIBUDEV_NO_PKG_CONFIG: "1"
+        run: >-
+          cargo build --release --locked
+          --package flugdiggi-decky
+          --features flugdiggi-core/vendored-libusb
+          --target x86_64-unknown-linux-musl
+      - run: |
+          mkdir -p decky/plugin/backend/out
+          cp target/x86_64-unknown-linux-musl/release/flugdiggi-decky decky/plugin/backend/out/
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - working-directory: decky/plugin
+        run: pnpm install --frozen-lockfile && pnpm run build
+
+      # Created as a draft so all assets are attached before the release is published.
+      - run: |
+          args=(--draft --verify-tag --generate-notes)
+          [[ "$GITHUB_REF_NAME" == *-* ]] && args+=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" "${args[@]}"
+      - uses: paulmiro/decky-store-proxy/actions/package-plugin@79acd23cca25086b63737e30ff5e2e0687e94bc9
+        with:
+          plugin-dir: decky/plugin
+          release: upload
+      - run: gh release edit "$GITHUB_REF_NAME" --draft=false

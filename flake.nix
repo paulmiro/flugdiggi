@@ -34,8 +34,6 @@
         }
       );
 
-      nixosModules.decky-plugin = import ./decky-module.nix self;
-
       devShells = forAllSystems (
         system:
         let
