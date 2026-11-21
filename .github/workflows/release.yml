@@ -25,8 +25,11 @@ jobs:
           stdio=$(echo '#include <stdio.h>' | musl-gcc -xc -E - | grep -m1 -o '"/[^"]*/stdio\.h"' | tr -d '"')
           sudo ln -s /usr/include/linux /usr/include/asm-generic /usr/include/x86_64-linux-gnu/asm "$(dirname "$stdio")/"
       # libusb without udev, which would have to be linked statically as well.
+      # The workspace keeps line tables for the CLI's error reports. The helper doesn't need
+      # them, and without debug info Cargo also strips the standard library's.
       - env:
           LIBUDEV_NO_PKG_CONFIG: "1"
+          CARGO_PROFILE_RELEASE_DEBUG: "false"
         run: >-
           cargo build --release --locked
           --package flugdiggi-decky
